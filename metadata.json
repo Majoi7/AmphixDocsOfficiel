@@ -1,0 +1,6 @@
+{
+  "name": "AmphixDocs",
+  "description": "Plateforme minimaliste de stockage et de consultation de documents sécurisée et intuitive.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+@theme {
+  --color-papier: #f1ece4;
+  --color-panneau: #4a6cf0;
+  --color-cobalt: #4a6cf0;
+  --color-encre: #141414;
+  --color-orange-accent: #ff6a2b;
+  --color-orange-clair: #ff8a4c;
+  --color-jaune-sticker: #ffd23f;
+  --color-bleu-clair: #9ab8ff;
+  --color-rose: #ffb6e1;
+  --color-violet-fonce: #1b1230;
+
+  --font-sans: 'DM Sans', 'Manrope', system-ui, -apple-system, sans-serif;
+  --font-display: 'DM Sans', system-ui, sans-serif;
+}
+
+:root {
+  --papier: #f1ece4;
+  --panneau: #4a6cf0;
+  --encre: #141414;
+  --orange-accent: #ff6a2b;
+  --orange-clair: #ff8a4c;
+  --jaune-sticker: #ffd23f;
+  --bleu-clair: #9ab8ff;
+  --rose: #ffb6e1;
+  --violet-fonce: #1b1230;
+}
+
+body {
+  background-color: var(--papier);
+  color: var(--encre);
+  font-family: 'DM Sans', 'Manrope', system-ui, -apple-system, sans-serif;
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Éviter le zoom iOS automatique sur les champs de saisie */
+@media screen and (max-width: 768px) {
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* Safe areas iOS / Android */
+.safe-top {
+  padding-top: max(16px, env(safe-area-inset-top, 16px));
+}
+.safe-bottom {
+  padding-bottom: max(16px, env(safe-area-inset-bottom, 16px));
+}
+.pb-nav {
+  padding-bottom: calc(96px + env(safe-area-inset-bottom, 16px));
+}
+
+/* Masquer les barres de défilement pour les scroll-snaps horizontaux */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Custom 3d flip card preserve */
+.perspective-1000 {
+  perspective: 1000px;
+}
+.transform-style-3d {
+  transform-style: preserve-3d;
+}
+.backface-hidden {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+.rotate-y-180 {
+  transform: rotateY(180deg);
+}

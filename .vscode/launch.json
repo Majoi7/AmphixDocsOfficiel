@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Lancer AmphixDocs (Chrome)",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://localhost:3000",
+      "webRoot": "${workspaceFolder}/src",
+      "sourceMapPathOverrides": {
+        "webpack:///src/*": "${webRoot}/*"
+      }
+    },
+    {
+      "name": "Lancer AmphixDocs (Edge)",
+      "type": "msedge",
+      "request": "launch",
+      "url": "http://localhost:3000",
+      "webRoot": "${workspaceFolder}/src"
+    }
+  ]
+}
