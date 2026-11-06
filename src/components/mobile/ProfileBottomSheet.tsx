@@ -1,119 +1,49 @@
-import React from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { Compass, LogOut, Shield, UserRound } from 'lucide-react';
 import { BottomSheet } from './BottomSheet';
 import { useAuth } from '../../context/AuthContext';
-import { Shield, LogOut, FileText, CheckCircle2 } from 'lucide-react';
+import { errorMessage } from '../../lib/errors';
 
 interface ProfileBottomSheetProps {
   isOpen: boolean;
   onClose: () => void;
+  onExplore: () => void;
 }
 
-export const ProfileBottomSheet: React.FC<ProfileBottomSheetProps> = ({
-  isOpen,
-  onClose,
-}) => {
+export function ProfileBottomSheet({ isOpen, onClose, onExplore }: ProfileBottomSheetProps) {
   const { user, isAdmin, signOut } = useAuth();
   const navigate = useNavigate();
-
-  const handleAdminClick = () => {
-    onClose();
-    navigate('/admin');
-  };
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const busyRef = useRef(false);
+  const mountedRef = useRef(false);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   const handleSignOut = async () => {
-    onClose();
-    await signOut();
-    navigate('/');
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setIsSigningOut(true);
+    setError(null);
+    try { await signOut(); onClose(); navigate('/'); }
+    catch (cause) { if (mountedRef.current) setError(errorMessage(cause, 'La déconnexion a échoué. Réessayez.')); }
+    finally { busyRef.current = false; if (mountedRef.current) setIsSigningOut(false); }
   };
+  const name = user?.user_metadata?.full_name || user?.user_metadata?.name || 'Membre AmphixDocs';
+  const avatar = user?.user_metadata?.avatar_url || user?.user_metadata?.picture;
+  const buttonClass = 'flex min-h-12 w-full min-w-0 cursor-pointer items-center gap-3 rounded-2xl border px-4 py-3 text-left text-sm font-bold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0] disabled:cursor-not-allowed disabled:opacity-50';
 
-  const userEmail = user?.email || 'utilisateur@amphix.site';
-  const userName =
-    user?.user_metadata?.full_name ||
-    user?.user_metadata?.name ||
-    userEmail.split('@')[0] ||
-    'Membre AmphixDocs';
-  const userAvatar = user?.user_metadata?.avatar_url || user?.user_metadata?.picture;
-
-  return (
-    <BottomSheet isOpen={isOpen} onClose={onClose} title="Mon Profil">
-      <div className="flex flex-col gap-5 pt-2 pb-6">
-        {/* Identité utilisateur */}
-        <div className="flex items-center gap-4 bg-white/70 p-4 rounded-2xl border border-[#141414]/10 shadow-xs">
-          {userAvatar ? (
-            <img
-              src={userAvatar}
-              alt={userName}
-              className="w-14 h-14 rounded-full object-cover border-2 border-[#ff6a2b] shadow-xs"
-            />
-          ) : (
-            <div className="w-14 h-14 rounded-full bg-[#ff6a2b] text-white flex items-center justify-center text-xl font-extrabold shadow-xs">
-              {userName.charAt(0).toUpperCase()}
-            </div>
-          )}
-          <div className="flex-1 min-w-0">
-            <h4 className="text-base font-extrabold text-[#141414] truncate">{userName}</h4>
-            <p className="text-xs text-[#141414]/65 truncate font-mono">{userEmail}</p>
-            <div className="mt-1 flex items-center gap-1.5">
-              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold ${
-                isAdmin
-                  ? 'bg-[#ffd23f] text-[#141414]'
-                  : 'bg-emerald-100 text-emerald-800'
-              }`}>
-                {isAdmin ? <Shield className="w-3 h-3" /> : <CheckCircle2 className="w-3 h-3" />}
-                {isAdmin ? 'Administrateur' : 'Membre vérifié'}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Actions */}
-        <div className="flex flex-col gap-2.5">
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={handleAdminClick}
-              className="w-full flex items-center justify-between p-4 rounded-2xl bg-[#ffd23f]/25 hover:bg-[#ffd23f]/40 border-2 border-[#ffd23f] text-[#141414] font-bold text-sm transition-all active:scale-98 cursor-pointer"
-            >
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-[#ffd23f] flex items-center justify-center text-[#141414] shadow-xs">
-                  <Shield className="w-5 h-5" />
-                </div>
-                <div className="text-left">
-                  <p className="font-extrabold">Console Admin</p>
-                  <p className="text-xs text-[#141414]/70">Modérer les documents & utilisateurs</p>
-                </div>
-              </div>
-              <span className="text-xs font-black uppercase tracking-wider text-[#ff6a2b]">Accéder →</span>
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={() => {
-              onClose();
-              navigate('/dashboard');
-            }}
-            className="w-full flex items-center gap-3 p-3.5 rounded-2xl bg-white hover:bg-neutral-50 border border-[#141414]/10 text-[#141414] font-bold text-sm transition-all active:scale-98 cursor-pointer"
-          >
-            <div className="w-9 h-9 rounded-xl bg-[#4a6cf0]/15 text-[#4a6cf0] flex items-center justify-center">
-              <FileText className="w-5 h-5" />
-            </div>
-            <span>Tous mes documents</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleSignOut}
-            className="w-full flex items-center gap-3 p-3.5 rounded-2xl bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-600 font-bold text-sm transition-all active:scale-98 cursor-pointer"
-          >
-            <div className="w-9 h-9 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center">
-              <LogOut className="w-5 h-5" />
-            </div>
-            <span>Se déconnecter</span>
-          </button>
-        </div>
+  return <BottomSheet isOpen={isOpen} onClose={onClose} title="Mon profil" canClose={!isSigningOut}>
+    <div className="flex min-w-0 flex-col gap-4 pb-4">
+      <div className="flex min-w-0 items-center gap-3 rounded-2xl border border-[#141414]/10 bg-white/70 p-4">
+        {avatar ? <img src={avatar} alt="" className="h-12 w-12 shrink-0 rounded-full border-2 border-[#ff6a2b] object-cover" /> : <UserRound aria-hidden="true" size={32} className="shrink-0 text-[#ff6a2b]" />}
+        <div className="min-w-0 flex-1"><p className="truncate font-extrabold">{name}</p>{user?.email && <p className="truncate text-xs text-[#141414]/70">{user.email}</p>}<span className="mt-2 inline-flex rounded-full bg-[#ffd23f]/50 px-2 py-1 text-xs font-bold">{isAdmin ? 'Administrateur' : 'Membre'}</span></div>
       </div>
-    </BottomSheet>
-  );
-};
+      {isAdmin && <button type="button" disabled={isSigningOut} onClick={() => { onClose(); navigate('/admin'); }} className={`${buttonClass} border-[#ffd23f] bg-[#ffd23f]/25 hover:bg-[#ffd23f]/40`}><Shield aria-hidden="true" size={22} className="shrink-0" />Console admin</button>}
+      <button type="button" disabled={isSigningOut} onClick={() => { onClose(); onExplore(); }} className={`${buttonClass} border-[#141414]/10 bg-white hover:bg-neutral-50`}><Compass aria-hidden="true" size={22} className="shrink-0" />Explorer les fichiers</button>
+      <button type="button" disabled={isSigningOut} onClick={() => void handleSignOut()} className={`${buttonClass} border-rose-200 bg-rose-50 text-rose-800 hover:bg-rose-100`}><LogOut aria-hidden="true" size={22} className="shrink-0" />{isSigningOut ? 'Déconnexion en cours…' : 'Se déconnecter'}</button>
+      {isSigningOut && <p role="status" className="text-sm">La feuille se fermera après confirmation de la déconnexion.</p>}
+      {error && <p role="alert" className="break-words text-sm text-red-800">{error}</p>}
+    </div>
+  </BottomSheet>;
+}

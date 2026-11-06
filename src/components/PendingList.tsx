@@ -1,451 +1,243 @@
-import React, { useState } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import {
-  DocumentItem,
-  FolderItem,
-  formatDateFrench,
-  formatFileSize,
-  getDocumentSignedUrl,
-  setItemApprovalStatus,
-  approveAllPendingItems,
-} from '../lib/supabase';
-import {
-  Check,
-  X,
-  ExternalLink,
-  Folder,
-  FileText,
-  AlertCircle,
-  Loader2,
-  CheckCheck,
-  Filter,
-  Sparkles,
-} from 'lucide-react';
+import { useEffect, useId, useRef, useState } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
+import { AlertCircle, Check, CheckCheck, ExternalLink, FileText, Loader2, X } from 'lucide-react';
+import { approveAllPendingItems, compareDates, formatDateFrench, formatFileSize, setItemApprovalStatus } from '../lib/supabase';
+import type { DocumentItem } from '../lib/supabase';
+import type { AdminLibraryData } from '../lib/admin-library';
+import { inspectModerationResult, type ModerationIntent } from '../lib/admin-confirmations';
+import { errorMessage } from '../lib/errors';
+import { useDocumentLink } from '../hooks/useDocumentLink';
+import { BottomSheet } from './mobile/BottomSheet';
 
 interface PendingListProps {
   documents: DocumentItem[];
-  folders: FolderItem[];
-  onRefresh: () => Promise<void>;
+  onRefresh: () => Promise<AdminLibraryData>;
   currentUserId: string;
+  isCurrent: () => boolean;
+  disabled?: boolean;
+  onInteractionChange: (active: boolean) => void;
+}
+interface ModerationAction {
+  intent: ModerationIntent;
+  title: string;
+  collective: boolean;
+  attempted: boolean;
+  mutationConfirmed: boolean;
+}
+const buttonClass = 'inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-xl px-3 py-2 text-sm font-bold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0] disabled:cursor-not-allowed disabled:opacity-50';
+
+function PendingDocumentRow({ document, disabled, onApprove, onReject }: {
+  document: DocumentItem;
+  disabled: boolean;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  const reducedMotion = useReducedMotion();
+  const { url, isPreparing, linkError, prepareLink } = useDocumentLink(document.file_path);
+  return (
+    <motion.article layout={!reducedMotion} initial={reducedMotion ? false : { opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }} exit={reducedMotion ? undefined : { opacity: 0 }}
+      transition={reducedMotion ? { duration: 0 } : { type: 'spring', stiffness: 350, damping: 30 }}
+      className="min-w-0 rounded-2xl border-2 border-[#141414]/15 bg-white p-4 shadow-2xs sm:p-5">
+      <div className="flex min-w-0 items-start gap-3">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-[#4a6cf0] bg-[#4a6cf0]/10">
+          <FileText className="h-5 w-5 text-[#4a6cf0]" aria-hidden="true" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h3 className="break-words text-base font-extrabold">{document.title}</h3>
+          <p className="mt-1 break-words text-xs text-[#141414]/65">{document.file_name}</p>
+          <div className="mt-2 flex flex-wrap gap-2 text-xs font-bold">
+            <span className="max-w-full break-words rounded-lg bg-[#9ab8ff]/25 px-2 py-1">{document.school_name || 'École non renseignée'}</span>
+            <span className="max-w-full break-words rounded-lg bg-[#ffd23f]/25 px-2 py-1">{document.subject_name || 'Matière non renseignée'}</span>
+          </div>
+          {document.description && <p className="mt-2 break-words text-sm text-[#141414]/75">{document.description}</p>}
+          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[#141414]/65">
+            <span className="flex min-w-0 max-w-full items-center gap-1.5">
+              {document.author_avatar && <img src={document.author_avatar} alt="" className="h-5 w-5 shrink-0 rounded-full object-cover" />}
+              <span className="break-words font-bold">{document.author_name || 'Utilisateur'}</span>
+            </span>
+            <span>{formatDateFrench(document.created_at)}</span>
+            <span>{formatFileSize(document.file_size)}</span>
+          </div>
+        </div>
+      </div>
+      <div className="mt-4 grid min-w-0 grid-cols-2 gap-2 border-t border-[#141414]/10 pt-3 sm:flex sm:flex-wrap sm:justify-end">
+        {url ? (
+          <a href={url} target="_blank" rel="noopener noreferrer" className={`${buttonClass} col-span-2 bg-[#f1ece4] text-[#141414] hover:bg-[#ffd23f]`}
+            aria-label={`Ouvrir l’aperçu de ${document.title} dans un nouvel onglet`}>
+            <ExternalLink className="h-4 w-4 shrink-0" aria-hidden="true" /> Ouvrir l’aperçu
+          </a>
+        ) : (
+          <button type="button" disabled={disabled || isPreparing} onClick={() => void prepareLink()}
+            className={`${buttonClass} col-span-2 bg-[#f1ece4] hover:bg-[#ffd23f]`} aria-label={`Préparer l’aperçu de ${document.title}`}>
+            {isPreparing ? <Loader2 className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" /> : <ExternalLink className="h-4 w-4 shrink-0" aria-hidden="true" />}
+            {isPreparing ? 'Préparation…' : 'Préparer l’aperçu'}
+          </button>
+        )}
+        <button type="button" disabled={disabled} onClick={onApprove} className={`${buttonClass} bg-emerald-700 text-white hover:bg-emerald-800`}>
+          <Check className="h-4 w-4 shrink-0" aria-hidden="true" /> Approuver
+        </button>
+        <button type="button" disabled={disabled} onClick={onReject} className={`${buttonClass} border border-rose-300 text-rose-700 hover:bg-rose-50`}>
+          <X className="h-4 w-4 shrink-0" aria-hidden="true" /> Refuser
+        </button>
+      </div>
+      {linkError && <p role="alert" className="mt-3 break-words text-sm text-red-700">{linkError} Réessayez la préparation.</p>}
+    </motion.article>
+  );
 }
 
-type FilterType = 'all' | 'files' | 'folders';
-
-export const PendingList: React.FC<PendingListProps> = ({
-  documents,
-  folders,
-  onRefresh,
-  currentUserId,
-}) => {
-  const [filterType, setFilterType] = useState<FilterType>('all');
+export function PendingList({ documents, onRefresh, currentUserId, isCurrent, disabled = false, onInteractionChange }: PendingListProps) {
   const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
-  const [refusingItemId, setRefusingItemId] = useState<string | null>(null);
-  const [refusalReason, setRefusalReason] = useState<string>('');
-  const [approvingId, setApprovingId] = useState<string | null>(null);
-  const [shakingId, setShakingId] = useState<string | null>(null);
-  const [showApproveAllPopover, setShowApproveAllPopover] = useState(false);
-  const [isApprovingAll, setIsApprovingAll] = useState(false);
+  const [action, setAction] = useState<ModerationAction | null>(null);
+  const [isWorking, setIsWorking] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const operationRef = useRef(false);
+  const mountedRef = useRef(false);
+  const sortId = useId();
+  const reasonId = useId();
+  const hasInteraction = action !== null;
+  const pendingDocuments = documents.filter((document) => document.status === 'pending' && document.deleted_at === null)
+    .sort((a, b) => compareDates(a.created_at, b.created_at, sortOrder));
 
-  // Éléments pending
-  const pendingDocs = documents.filter((d) => d.status === 'pending');
-  const pendingFolders = folders.filter((f) => f.status === 'pending');
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  useEffect(() => {
+    onInteractionChange(hasInteraction);
+    return () => onInteractionChange(false);
+  }, [hasInteraction, onInteractionChange]);
 
-  type UnifiedItem = {
-    kind: 'file' | 'folder';
-    id: string;
-    title: string;
-    description: string | null;
-    authorName: string;
-    authorAvatar: string;
-    authorEmail: string;
-    date: string;
-    fileType?: string;
-    size?: number;
-    filePath?: string;
+  const closeAction = () => {
+    if (!operationRef.current) { setAction(null); setActionError(null); }
   };
-
-  const unifiedList: UnifiedItem[] = [
-    ...pendingFolders.map((f) => ({
-      kind: 'folder' as const,
-      id: f.id,
-      title: f.name,
-      description: `Dossier contenant ${f.document_count || 0} document(s)`,
-      authorName: f.author_name || 'Utilisateur',
-      authorAvatar: f.author_avatar || '',
-      authorEmail: f.author_email || '',
-      date: f.created_at,
-    })),
-    ...pendingDocs.map((d) => ({
-      kind: 'file' as const,
-      id: d.id,
-      title: d.title,
-      description: d.description,
-      authorName: d.author_name || 'Utilisateur',
-      authorAvatar: d.author_avatar || '',
-      authorEmail: d.author_email || '',
-      date: d.created_at,
-      fileType: d.file_type,
-      size: d.file_size,
-      filePath: d.file_path,
-    })),
-  ];
-
-  const filteredList = unifiedList.filter((item) => {
-    if (filterType === 'files') return item.kind === 'file';
-    if (filterType === 'folders') return item.kind === 'folder';
-    return true;
-  }).sort((a, b) => {
-    const da = new Date(a.date).getTime();
-    const db = new Date(b.date).getTime();
-    return sortOrder === 'desc' ? db - da : da - db;
-  });
-
-  const handleApprove = async (item: UnifiedItem) => {
+  const openAction = (documentIds: string[], status: 'approved' | 'rejected', title: string, collective = false) => {
+    if (disabled || operationRef.current || !isCurrent() || documentIds.length === 0) return;
+    setNotice(null);
     setActionError(null);
-    setApprovingId(item.id);
-    try {
-      await setItemApprovalStatus(
-        item.kind === 'file' ? 'document' : 'folder',
-        item.id,
-        'approved',
-        undefined,
-        currentUserId
-      );
-      await onRefresh();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Impossible d’approuver cet élément. Réessayez.');
-    } finally {
-      setApprovingId(null);
+    // La sélection est figée : un nouveau fichier arrivé pendant la confirmation
+    // ne rejoint pas silencieusement une approbation collective.
+    setAction({ intent: { documentIds: [...documentIds], status, rejectionReason: '' }, title, collective, attempted: false, mutationConfirmed: false });
+  };
+  const performAction = async () => {
+    if (!action || operationRef.current || !isCurrent()) return;
+    if (!action.attempted && disabled) return;
+    const reason = action.intent.rejectionReason?.trim() || '';
+    if (!action.attempted && action.intent.status === 'rejected' && !reason) {
+      setActionError('Indiquez un motif de refus avant de confirmer.');
+      return;
     }
-  };
-
-  const handleRefuse = async (item: UnifiedItem) => {
+    const intent = { ...action.intent, rejectionReason: reason };
+    const current = () => mountedRef.current && isCurrent();
+    let mutationConfirmed = action.mutationConfirmed;
+    let mutationError: string | null = null;
+    operationRef.current = true;
+    setIsWorking(true);
     setActionError(null);
-    setShakingId(item.id);
     try {
-      await setItemApprovalStatus(
-        item.kind === 'file' ? 'document' : 'folder',
-        item.id,
-        'rejected',
-        refusalReason || 'Non approuvé par l\'administrateur',
-        currentUserId
-      );
-      await onRefresh();
-      setRefusingItemId(null);
-      setRefusalReason('');
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Impossible de refuser cet élément. Réessayez.');
+      if (!action.attempted) {
+        // Une fois envoyée, seule une relecture est proposée par ce dialogue.
+        // Une réponse perdue ne déclenche jamais une seconde mutation automatique.
+        setAction({ ...action, intent, attempted: true });
+        try {
+          if (action.collective) await approveAllPendingItems({ documentIds: [...intent.documentIds] }, currentUserId);
+          else await setItemApprovalStatus(intent.documentIds[0], intent.status, intent.rejectionReason, currentUserId);
+          if (!current()) return;
+          mutationConfirmed = true;
+          setAction({ ...action, intent, attempted: true, mutationConfirmed: true });
+        } catch (cause) {
+          if (!current()) return;
+          mutationError = errorMessage(cause, 'La modération n’a pas été confirmée.');
+        }
+      }
+      try {
+        const data = await onRefresh();
+        if (!current()) return;
+        const result = inspectModerationResult(intent, data.documents);
+        if (result.complete) {
+          setNotice(mutationConfirmed
+            ? `${result.confirmedIds.length} fichier(s) ${intent.status === 'approved' ? 'approuvé(s)' : 'refusé(s)'} : confirmation reçue et liste actualisée.`
+            : `La relecture confirme l’état ${intent.status === 'approved' ? 'approuvé' : 'refusé'} des ${result.confirmedIds.length} fichier(s). Elle ne permet pas d’attribuer la modification à ce clic.`);
+          setAction(null);
+        } else {
+          const details = `${result.confirmedIds.length} à l’état demandé, ${result.pendingIds.length} encore en attente, ${result.differentIds.length} modéré(s) autrement, ${result.unavailableIds.length} absent(s) ou en corbeille.`;
+          setActionError(`${mutationConfirmed ? 'La mutation a été confirmée, mais l’état a ensuite changé pour certains fichiers.' : 'La relecture ne confirme pas toute l’action.'} ${details} Aucune nouvelle mutation n’est envoyée. Fermez ce dialogue pour vérifier la liste avant une nouvelle action.`);
+        }
+      } catch (cause) {
+        if (!current()) return;
+        const readError = errorMessage(cause, 'La liste n’a pas pu être actualisée.');
+        setActionError(mutationConfirmed
+          ? `La modération a été enregistrée, mais la liste n’a pas pu être actualisée : ${readError} Réessayez l’actualisation, pas la modification.`
+          : `Le résultat reste incertain. ${mutationError ? `${mutationError} ` : ''}${readError} Relisez l’état avant toute nouvelle action.`);
+      }
     } finally {
-      setShakingId(null);
-    }
-  };
-
-  const handleApproveAll = async () => {
-    setActionError(null);
-    setIsApprovingAll(true);
-    try {
-      await approveAllPendingItems({
-        documentIds: filteredList.filter((item) => item.kind === 'file').map((item) => item.id),
-        folderIds: filteredList.filter((item) => item.kind === 'folder').map((item) => item.id),
-      }, currentUserId);
-      await onRefresh();
-      setShowApproveAllPopover(false);
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'L’approbation collective a échoué. Actualisez la liste avant de réessayer.');
-      // Une table peut avoir réussi alors que l'autre a échoué.
-      // Réconcilier la liste, sans transformer un échec en succès global.
-      try { await onRefresh(); } catch { /* Le message de l’opération reste affiché. */ }
-    } finally {
-      setIsApprovingAll(false);
-    }
-  };
-
-  const handleOpenPreview = async (filePath?: string) => {
-    if (!filePath) return;
-    setActionError(null);
-    try {
-      const url = await getDocumentSignedUrl(filePath);
-      window.open(url, '_blank', 'noopener,noreferrer');
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Impossible d’ouvrir cet aperçu. Réessayez.');
+      operationRef.current = false;
+      if (current()) setIsWorking(false);
     }
   };
 
   return (
-    <div className="space-y-6">
-      {actionError && (
-        <div role="alert" className="flex items-start gap-3 rounded-2xl border-2 border-red-200 bg-red-50 p-4 text-sm font-bold text-red-800">
-          <AlertCircle className="h-5 w-5 shrink-0" aria-hidden="true" />
-          <p>{actionError}</p>
-        </div>
-      )}
-      {/* Barre d'outils et filtres */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4 bg-white p-4 rounded-2xl border-2 border-[#141414]/15 shadow-2xs">
-        {/* Filtres Tous / Fichiers / Dossiers */}
-        <div className="flex items-center gap-1.5 p-1 bg-[#f1ece4] rounded-xl self-start">
-          {(['all', 'files', 'folders'] as FilterType[]).map((type) => {
-            const labels = { all: 'Tous', files: 'Fichiers', folders: 'Dossiers' };
-            const isActive = filterType === type;
-            return (
-              <button
-                key={type}
-                type="button"
-                onClick={() => setFilterType(type)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition-all cursor-pointer ${
-                  isActive
-                    ? 'bg-white text-[#141414] shadow-2xs'
-                    : 'text-[#141414]/60 hover:text-[#141414]'
-                }`}
-              >
-                {labels[type]}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Tri et Tout approuver */}
-        <div className="flex items-center justify-end gap-3">
-          <select
-            value={sortOrder}
-            onChange={(e) => setSortOrder(e.target.value as 'desc' | 'asc')}
-            className="px-3 py-1.5 rounded-xl bg-[#f1ece4]/70 border border-[#141414]/15 text-xs font-bold text-[#141414] focus:outline-hidden"
-          >
-            <option value="desc">Plus récents d'abord</option>
-            <option value="asc">Plus anciens d'abord</option>
+    <div className="min-w-0 space-y-5">
+      {notice && <p role="status" className="break-words rounded-2xl border border-emerald-300 bg-emerald-50 p-4 text-sm text-emerald-900">{notice}</p>}
+      <div className="flex min-w-0 flex-col gap-3 rounded-2xl border-2 border-[#141414]/15 bg-white p-4 sm:flex-row sm:items-end sm:justify-between">
+        <div className="min-w-0">
+          <p className="mb-2 text-sm font-bold">{pendingDocuments.length} fichier(s) en attente</p>
+          <label htmlFor={sortId} className="mb-1 block text-xs font-bold text-[#141414]/70">Ordre d’affichage</label>
+          <select id={sortId} value={sortOrder} disabled={hasInteraction || disabled}
+            onChange={(event) => setSortOrder(event.target.value === 'asc' ? 'asc' : 'desc')}
+            className="min-h-11 w-full min-w-0 rounded-xl border border-[#141414]/20 bg-[#f1ece4] px-3 text-base focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0] disabled:opacity-50">
+            <option value="desc">Plus récents d’abord</option><option value="asc">Plus anciens d’abord</option>
           </select>
-
-          {/* Bouton "Tout approuver" avec popover de confirmation */}
-          {filteredList.length > 0 && (
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setShowApproveAllPopover((p) => !p)}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-emerald-600 text-white font-extrabold text-xs shadow-sm hover:bg-emerald-700 transition-colors cursor-pointer"
-              >
-                <CheckCheck className="w-4 h-4" />
-                <span>Tout approuver ({filteredList.length})</span>
-              </button>
-
-              {showApproveAllPopover && (
-                <div className="absolute right-0 top-11 z-30 w-64 bg-white rounded-2xl border-2 border-[#141414] shadow-xl p-3 flex flex-col gap-2">
-                  <div className="flex items-center gap-2 text-xs font-bold text-[#141414]">
-                    <AlertCircle className="w-4 h-4 text-emerald-600" />
-                    <span>Approuver les {filteredList.length} éléments ?</span>
-                  </div>
-                  <div className="flex items-center gap-2 pt-1">
-                    <button
-                      type="button"
-                      disabled={isApprovingAll}
-                      onClick={handleApproveAll}
-                      className="flex-1 py-1 px-2 rounded-lg bg-emerald-600 text-white text-[11px] font-bold hover:bg-emerald-700 flex items-center justify-center gap-1"
-                    >
-                      {isApprovingAll ? <Loader2 className="w-3 h-3 animate-spin" /> : 'Oui, valider tout'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowApproveAllPopover(false)}
-                      className="py-1 px-2 rounded-lg bg-[#f1ece4] text-[11px] font-bold"
-                    >
-                      Annuler
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </div>
+        {pendingDocuments.length > 0 && <button type="button" disabled={disabled || hasInteraction}
+          onClick={() => openAction(pendingDocuments.map((document) => document.id), 'approved', 'Approbation collective', true)}
+          className={`${buttonClass} bg-emerald-700 text-white hover:bg-emerald-800`}>
+          <CheckCheck className="h-4 w-4 shrink-0" aria-hidden="true" /> Tout approuver ({pendingDocuments.length})
+        </button>}
       </div>
-
-      {/* Liste des éléments en attente */}
-      {filteredList.length === 0 ? (
-        <div className="bg-white rounded-3xl border-2 border-[#141414]/15 p-12 text-center flex flex-col items-center">
-          <div className="w-14 h-14 rounded-2xl bg-emerald-100 border border-emerald-400 flex items-center justify-center mb-3 text-emerald-700">
-            <Check className="w-7 h-7 stroke-[3]" />
-          </div>
-          <h3 className="font-extrabold text-xl text-[#141414] mb-1">
-            Tout est à jour !
-          </h3>
-          <p className="text-xs text-[#141414]/60 max-w-xs">
-            Aucun document ni dossier en attente d'approbation pour le moment.
-          </p>
+      {pendingDocuments.length === 0 ? (
+        <div className="rounded-3xl border-2 border-[#141414]/15 bg-white px-4 py-10 text-center">
+          <Check className="mx-auto mb-3 h-8 w-8 text-emerald-700" aria-hidden="true" />
+          <h3 className="text-xl font-extrabold">Aucun fichier en attente</h3>
+          <p className="mt-2 text-sm text-[#141414]/65">Tous les fichiers actifs visibles ont un statut de modération.</p>
         </div>
       ) : (
-        <div className="space-y-3">
-          <AnimatePresence mode="popLayout">
-            {filteredList.map((item) => {
-              const isApproving = approvingId === item.id;
-              const isShaking = shakingId === item.id;
-              const isRefusingThis = refusingItemId === item.id;
-
-              return (
-                <motion.div
-                  key={`${item.kind}-${item.id}`}
-                  layout
-                  initial={{ opacity: 0, y: 12, scale: 0.98 }}
-                  animate={
-                    isApproving
-                      ? { backgroundColor: '#dcfce7', scale: 0.98, opacity: 0.9 }
-                      : isShaking
-                      ? { x: [-8, 8, -6, 6, 0], rotate: -4, opacity: 0.5 }
-                      : { opacity: 1, y: 0, scale: 1 }
-                  }
-                  exit={{
-                    scale: 0.8,
-                    rotate: -6,
-                    opacity: 0,
-                    transition: { duration: 0.35 },
-                  }}
-                  className={`bg-white rounded-2xl border-2 border-[#141414]/15 p-4 sm:p-5 shadow-2xs transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
-                    isApproving ? 'bg-emerald-50 border-emerald-500' : ''
-                  }`}
-                >
-                  {/* Colonne gauche : Icône, Titre, Auteur, Détails */}
-                  <div className="flex items-start gap-3.5 flex-1 min-w-0">
-                    <div
-                      className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 border"
-                      style={{
-                        backgroundColor: item.kind === 'folder' ? '#ffd23f25' : '#4a6cf018',
-                        borderColor: item.kind === 'folder' ? '#ffd23f' : '#4a6cf0',
-                      }}
-                    >
-                      {item.kind === 'folder' ? (
-                        <Folder className="w-5 h-5 text-[#141414]" />
-                      ) : (
-                        <FileText className="w-5 h-5 text-[#4a6cf0]" />
-                      )}
-                    </div>
-
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="font-[800] text-base text-[#141414] truncate">
-                          {item.title}
-                        </span>
-                        <span
-                          className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
-                            item.kind === 'folder'
-                              ? 'bg-[#ffd23f]/30 text-[#8a6800]'
-                              : 'bg-[#ff6a2b]/20 text-[#ff6a2b]'
-                          }`}
-                        >
-                          {item.kind === 'folder' ? 'Dossier' : item.fileType?.toUpperCase() || 'Fichier'}
-                        </span>
-                      </div>
-
-                      {item.description && (
-                        <p className="text-xs text-[#141414]/70 line-clamp-1 mb-2 font-medium">
-                          {item.description}
-                        </p>
-                      )}
-
-                      {/* Métadonnées de l'auteur */}
-                      <div className="flex flex-wrap items-center gap-3 text-[11px] text-[#141414]/60">
-                        <div className="flex items-center gap-1.5">
-                          {item.authorAvatar ? (
-                            <img
-                              src={item.authorAvatar}
-                              alt=""
-                              className="w-4 h-4 rounded-full object-cover"
-                            />
-                          ) : (
-                            <div className="w-4 h-4 rounded-full bg-[#141414]/20 flex items-center justify-center text-[9px] font-bold">
-                              {item.authorName.charAt(0)}
-                            </div>
-                          )}
-                          <span className="font-bold text-[#141414]">{item.authorName}</span>
-                        </div>
-
-                        <span>•</span>
-                        <span>{formatDateFrench(item.date)}</span>
-
-                        {item.size !== undefined && (
-                          <>
-                            <span>•</span>
-                            <span className="font-mono">{formatFileSize(item.size)}</span>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Colonne droite : Actions (Aperçu, Approuver, Refuser) */}
-                  <div className="flex flex-wrap sm:flex-nowrap items-center justify-end gap-2 w-full sm:w-auto shrink-0 pt-2.5 sm:pt-0 border-t sm:border-t-0 border-[#f1ece4]">
-                    {item.filePath && (
-                      <button
-                        type="button"
-                        onClick={() => handleOpenPreview(item.filePath)}
-                        className="p-2.5 sm:p-2 rounded-xl bg-[#f1ece4] hover:bg-[#141414] hover:text-white text-[#141414] transition-colors"
-                        title="Aperçu / Télécharger"
-                      >
-                        <ExternalLink className="w-4 h-4" />
-                      </button>
-                    )}
-
-                    {/* Approuver (Bouton large sur mobile) */}
-                    <button
-                      type="button"
-                      disabled={isApproving}
-                      onClick={() => handleApprove(item)}
-                      className="flex-1 sm:flex-initial inline-flex justify-center items-center gap-1.5 px-4 py-2.5 sm:py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold shadow-2xs transition-colors cursor-pointer"
-                    >
-                      {isApproving ? (
-                        <>
-                          <Check className="w-4 h-4 animate-bounce" />
-                          <span>Validé</span>
-                        </>
-                      ) : (
-                        <>
-                          <Check className="w-4 h-4" />
-                          <span>Approuver</span>
-                        </>
-                      )}
-                    </button>
-
-                    {/* Refuser (Bouton large sur mobile) */}
-                    {!isRefusingThis ? (
-                      <button
-                        type="button"
-                        onClick={() => setRefusingItemId(item.id)}
-                        className="flex-1 sm:flex-initial inline-flex justify-center items-center gap-1.5 px-4 py-2.5 sm:py-2 rounded-xl bg-white border border-[#e11d48]/40 hover:bg-[#e11d48]/10 text-[#e11d48] text-xs font-extrabold transition-colors cursor-pointer"
-                      >
-                        <X className="w-4 h-4" />
-                        <span>Refuser</span>
-                      </button>
-                    ) : (
-                      <div className="flex flex-1 sm:flex-initial items-center gap-1.5 bg-[#f1ece4] p-1.5 rounded-xl w-full sm:w-auto">
-                        <input
-                          type="text"
-                          placeholder="Motif du refus…"
-                          value={refusalReason}
-                          onChange={(e) => setRefusalReason(e.target.value)}
-                          className="text-xs px-2 py-1 rounded-lg bg-white border border-[#141414]/20 focus:outline-hidden w-36"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => handleRefuse(item)}
-                          className="px-2 py-1 rounded-lg bg-[#e11d48] text-white text-xs font-bold"
-                        >
-                          OK
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setRefusingItemId(null);
-                            setRefusalReason('');
-                          }}
-                          className="px-1.5 py-1 text-xs text-[#141414]/60"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </motion.div>
-              );
-            })}
-          </AnimatePresence>
-        </div>
+        <div className="min-w-0 space-y-3"><AnimatePresence>
+          {pendingDocuments.map((document) => <PendingDocumentRow key={document.id} document={document} disabled={disabled || hasInteraction}
+            onApprove={() => openAction([document.id], 'approved', document.title)}
+            onReject={() => openAction([document.id], 'rejected', document.title)} />)}
+        </AnimatePresence></div>
       )}
+      <BottomSheet isOpen={action !== null} onClose={closeAction} canClose={!isWorking} title={action?.collective ? 'Tout approuver' : action?.intent.status === 'rejected' ? 'Refuser un fichier' : 'Approuver un fichier'}>
+        {action && <form onSubmit={(event) => { event.preventDefault(); void performAction(); }} className="min-w-0 space-y-4">
+          <p className="break-words text-base font-bold">{action.collective ? `Approuver les ${action.intent.documentIds.length} fichiers sélectionnés ?` : action.title}</p>
+          <p className="text-sm text-[#141414]/75">{action.intent.status === 'approved'
+            ? 'Les fichiers approuvés seront accessibles aux autres membres tant qu’ils restent hors de la corbeille.'
+            : 'Le fichier restera visible par son auteur avec le statut refusé et votre motif.'}</p>
+          {action.intent.status === 'rejected' && <div>
+            <label htmlFor={reasonId} className="mb-2 block text-sm font-bold">Motif du refus</label>
+            <textarea id={reasonId} required readOnly={action.attempted} disabled={isWorking} rows={3} value={action.intent.rejectionReason || ''}
+              onChange={(event) => setAction({ ...action, intent: { ...action.intent, rejectionReason: event.target.value } })}
+              className="min-h-28 w-full min-w-0 resize-y rounded-2xl border border-[#141414]/25 bg-white p-3 text-base focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0] read-only:bg-[#f1ece4]" />
+            {action.attempted && <p className="mt-1 text-xs text-[#141414]/65">Le motif envoyé est figé pendant la vérification.</p>}
+          </div>}
+          {actionError && <div role="alert" className="flex min-w-0 items-start gap-2 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+            <AlertCircle className="h-5 w-5 shrink-0" aria-hidden="true" /><p className="min-w-0 break-words">{actionError}</p>
+          </div>}
+          {isWorking && <p role="status" className="text-sm">Envoi ou vérification en cours…</p>}
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <button type="submit" disabled={isWorking || (!action.attempted && disabled)}
+              className={`${buttonClass} flex-1 bg-[#ff6a2b] text-[#141414] hover:bg-[#ff8a4c]`}>
+              {isWorking && <Loader2 className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />}
+              {isWorking ? 'Vérification…' : action.attempted ? 'Réessayer l’actualisation' : 'Confirmer'}
+            </button>
+            <button type="button" data-autofocus disabled={isWorking} onClick={closeAction} className={`${buttonClass} flex-1 border border-[#141414]/20 bg-white`}>
+              {action.attempted ? 'Fermer et vérifier la liste' : 'Annuler'}
+            </button>
+          </div>
+        </form>}
+      </BottomSheet>
     </div>
   );
-};
+}

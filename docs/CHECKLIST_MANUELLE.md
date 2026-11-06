@@ -4,6 +4,31 @@
 >
 > Lire d'abord les P0 de [ROADMAP.md](ROADMAP.md). `schema.sql` et `migration_v2.sql` sont conservés sans modification : sur la base existante, utiliser les nouvelles migrations après comparaison de l'état installé. V3 répare les relations auteurs ; V4 prépare le durcissement RLS/Storage. Leur présence et les tests locaux ne prouvent pas les droits réellement installés. Les exemples utilisent uniquement des placeholders.
 
+### Registre des contrôles locaux — 5 novembre 2026
+
+Ce registre décrit des commandes exécutées localement ; **il ne coche aucune recette manuelle ou externe**. Les détails de reprise figurent en [section 13 de l’architecture](ARCHITECTURE.md#13-reprise-locale-des-contrats--5-novembre-2026).
+
+| Contrôle exécuté | Résultat et portée |
+| --- | --- |
+| `npx tsc --noEmit` | Réussi ; validation TypeScript locale. |
+| `npm run build` | Réussi, manifest et service worker générés ; avertissements de taille du chunk principal et de durée de callbacks PWA. Ne valide ni OAuth ni les RLS. |
+| `npm run lint` | Réussi ; alias de TypeScript, pas ESLint. |
+| `scripts/test-upload-batch.mjs` | 27/27 ; orchestration et journal, sans transfert réel. |
+| `scripts/test-dashboard-library.mjs` | 21/21 ; contrôleur indépendant de React, sans DOM/StrictMode réel. |
+| `scripts/test-relations.mjs` | 18/18 ; API Auth/SQL/Storage simulées, aucune opération distante. |
+| `scripts/test-security-sql.mjs` | 6/6 ; contrôles textuels, pas PostgreSQL/RLS installées. |
+| Run groupé des quatre scripts par `node --test --test-reporter=spec` | **72/72**, exit 0, fermeture normale et aucun avertissement WebSocket ; isolation Vite sans configuration applicative ni fichiers `.env`. |
+| Exclusions Git | `.env`, `.env.local`, `.env.production`, `dist/` et `graphify-out/` exclus ; parmi les chemins `.env*` suivis, seul `.env.example` est présent. Aucun secret lu ou recopié pour ce contrôle. |
+| Graphify du delta courant | Non confirmé : dernières tentatives bloquées avant lancement par le classificateur indisponible ; ne pas assimiler le graphe historique à une mise à jour réussie. |
+
+Commande reproductible, sans accès Supabase réel :
+
+```powershell
+node --test --test-reporter=spec scripts/test-upload-batch.mjs scripts/test-dashboard-library.mjs scripts/test-relations.mjs scripts/test-security-sql.mjs
+```
+
+Toutes les cases ci-dessous restent ouvertes jusqu’à exécution et consignation du résultat attendu/obtenu sur l’environnement approprié.
+
 ## 1. Préparer l'environnement de vérification
 
 - [ ] Identifier le projet Supabase réellement visé : organisation, environnement de test ou production et URL. Ne pas confondre un projet configuré dans `.env` avec un autre enregistré dans le navigateur.
@@ -136,6 +161,18 @@ L'exécution via SQL Editor avec des privilèges élevés **ne teste pas** le co
 - [ ] Tester le refus du consentement, une erreur du provider et une configuration manquante : message compréhensible, pas de compte démo présenté comme une connexion Google réussie.
 - [ ] Vérifier que la création du profil ne dépend pas uniquement d'un upsert côté navigateur et qu'une erreur de profil est visible sans boucle ni chargement infini.
 
+### Configuration, session et réponses obsolètes — recette non exécutée
+
+Utiliser uniquement des projets et comptes de test autorisés ; observer les états et requêtes sans afficher les clés ou jetons.
+
+- [ ] Tester configuration absente, paire locale incomplète, placeholders et valeurs invalides : client indisponible et message actionnable, pas de badge connecté ni de données de secours présentées comme réelles.
+- [ ] Tester deux configurations publiques de projets différents : aucune paire URL/clé mélangée, une paire locale invalide ne doit pas basculer silencieusement vers un autre projet.
+- [ ] Bloquer le stockage du site : formulaire de configuration et restauration Auth doivent exposer la limite réelle sans exception non traitée ni promesse de session durable.
+- [ ] Visiter directement `/admin` avec rôle encore en chargement, puis admin/user et erreur de profil : attente, accès/refus ou réessai appropriés, sans `amphix_force_admin` effectif.
+- [ ] Changer rapidement de compte/projet ou se déconnecter pendant une réponse de session/profil : aucun rôle, donnée ou erreur de l’ancien scope ne réapparaît dans le nouveau.
+- [ ] Faire échouer la déconnexion puis réessayer : le dashboard reste cohérent, l’erreur est visible et aucun délai arbitraire ne simule un succès. Tester aussi le démontage/changement de scope pendant cette opération.
+- [ ] Vérifier le rafraîchissement effectif du rôle après une promotion/rétrogradation autorisée ; la simple présence du guard ne constitue pas cette preuve.
+
 ## 5. Promotion du premier compte administrateur
 
 - [ ] Faire une première connexion Google avec le compte prévu ; vérifier que son profil a été créé avec le rôle ordinaire attendu.
@@ -212,6 +249,31 @@ Pour chaque ligne, vérifier **liste SQL visible via le client**, **carte UI** e
 - [ ] Tester l'aperçu et le téléchargement avec les bloqueurs de fenêtres usuels.
 - [ ] Vérifier les inscrits Google, les rôles, les dates/comptages présentés et les valeurs manquantes possibles.
 
+### Dépôt, journal et reprise — recette non exécutée
+
+Les 27 tests de module du journal et les API simulées ne remplacent pas ces scénarios. Injecter les pannes uniquement dans un environnement de test autorisé, avec des documents non sensibles ; ne pas supprimer une trace/objet distant pour forcer artificiellement un succès.
+
+- [ ] Déposer trois fichiers avec une panne au milieu : chaque succès apparaît une seule fois, le dossier et les compteurs sont cohérents et le bilan explique chaque échec. Réessayer sans rejouer les confirmations du lot en mémoire.
+- [ ] Perdre une réponse Storage après réception des octets, puis une réponse SQL après insertion : retrouver les mêmes UUID/chemins, sans second objet/ligne et sans compensation supprimant un objet déjà référencé.
+- [ ] Fermer puis rouvrir le modal après un résultat partiel ; recharger ensuite la page sans originaux disponibles : la trace est conservée et toutes les identités sont revérifiées, sans supposer une confirmation ancienne ni créer de nouvel UUID.
+- [ ] Si un original est requis, resélectionner un fichier de même nom/taille mais de contenu différent : refus explicite, aucun transfert, métadonnées figées et originaux compatibles déjà conservés inchangés.
+- [ ] Tester dossier existant/nouveau, erreur avant création du dossier, réponse de dossier perdue, conflit de contenu et absence Storage ambiguë : pas de nouveau transfert ou de nettoyage aveugle sur simple 404 générique.
+- [ ] Bloquer le stockage du journal, faire échouer sa relecture ou présenter une autre trace/incompatible : aucun nouvel envoi, erreur actionnable et trace existante conservée. Inspecter le journal uniquement en privé : aucune clé, jeton, profil ou donnée binaire de fichier ne doit y figurer.
+- [ ] Faire échouer le retrait du journal après un lot complet : avertissement récupérable, succès distants conservés et prochaine ouverture en vérification. La fin d’un lot ne doit pas retirer la trace d’un autre lot.
+- [ ] Faire échouer la notification locale du bilan après confirmation distante : le réessai d’affichage ne doit déclencher ni nouveau transfert ni INSERT.
+- [ ] Changer de compte/projet pendant préparation, transfert ou réponse SQL : les entrées suivantes s’arrêtent et aucune confirmation tardive n’est projetée sur l’autre dashboard ; la reprise reste liée au scope d’origine.
+- [ ] Tester la limite réelle de 20 971 520 octets et une description de 200 points de code Unicode, dont des caractères hors BMP : validation du formulaire, helper, SQL et bucket cohérente. Les tests de métadonnées ne prouvent pas le transfert à cette limite.
+- [ ] Examiner deux onglets et la suppression des données du site : consigner les limites du journal local, sans conclure à un verrou atomique ou à une reprise serveur durable.
+
+### Bibliothèque et raccordement React — recette non exécutée
+
+- [ ] En développement React StrictMode, monter/nettoyer/remonter le dashboard : aucun résultat de l’ancienne lecture n’est publié dans le nouveau contrôleur ; tester aussi compte, client, projet et rôle changés rapidement.
+- [ ] Pendant un chargement lent, confirmer dépôt, édition puis suppression : la réponse tardive ne doit ni perdre les ajouts ni rétablir les métadonnées/éléments supprimés.
+- [ ] Faire arriver deux lectures dans l’ordre inverse, puis une erreur ancienne : la dernière lecture démarrée est l’autorité ; les données déjà affichées restent disponibles après une vraie erreur avec Réessayer.
+- [ ] Répéter un rapport cumulatif après modification/suppression puis après relecture serveur : pas de doublon, retour d’anciennes métadonnées ou dossier/enfant supprimé ; une lecture autoritative peut retirer un élément devenu invisible.
+- [ ] Vérifier les états chargement, collection réellement vide et erreur séparément, y compris la recherche : une erreur ne doit pas devenir un EmptyState trompeur. Vérifier les compteurs sur les enfants effectivement visibles.
+- [ ] Fermer/rouvrir le modal, modifier la référence des catégories et laisser expirer la surbrillance après démontage : pas de perte du formulaire/lot ni de callback/timer appliqué à un autre scope.
+
 ## 9. PWA et hors-ligne — sur un build de production
 
 - [ ] Servir le build avec HTTPS ou localhost ; ne pas conclure à partir de `npm run dev` seul.
@@ -233,6 +295,8 @@ Pour chaque ligne, vérifier **liste SQL visible via le client**, **carte UI** e
 - [ ] Tester Accueil, Recherche, « + », Dossiers et Profil depuis `/dashboard` et `/admin` ; vérifier contenu, focus et indicateur actif, pas seulement l'URL.
 - [ ] Tester le clavier ouvert, les safe areas, le scroll interne des sheets et l'espace sous la pilule mobile.
 - [ ] Pour chaque dialogue : focus initial, Tab/Shift+Tab confiné, Échap lorsque l'opération le permet, restauration du focus et fond non interactif.
+- [ ] Tester `data-autofocus` sur un contrôle désactivé directement ou par `fieldset disabled`, caché/inert, puis un dialogue sans contrôle utilisable : focus sur un contrôle réellement utilisable ou le dialogue, jamais sur la cible indisponible.
+- [ ] Empiler deux dialogues, fermer le dernier puis le premier : confinement/restauration du focus et du verrou de scroll corrects. Pendant un transfert, vérifier la fermeture Échap permise/interdite selon l’état, sans perte de trace.
 - [ ] Tester cartes de fichiers/dossiers et tooltips au clavier, labels persistants, focus visible, boutons icônes et états sélectionnés.
 - [ ] Activer `prefers-reduced-motion` : portail, footer, slap, transitions de page, cartes 3D, boucles et springs doivent respecter la préférence.
 - [ ] Vérifier le français visible **et annoncé par lecteur d'écran**. Le footer contient encore des chaînes internes non paramétrables : ne pas modifier `components/ui/sticker-slap-footer.tsx` ni contourner la contrainte par un patch DOM. Consigner la limite et attendre une décision explicite sur les exigences incompatibles.

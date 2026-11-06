@@ -1,117 +1,42 @@
-import React, { useEffect, useRef } from 'react';
-import { motion, AnimatePresence, PanInfo } from 'motion/react';
+import { useId, useRef, type ReactNode } from 'react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { X } from 'lucide-react';
+import { useDialogAccessibility } from '../../hooks/useDialogAccessibility';
+import { useDialogViewport } from '../../hooks/useDialogViewport';
 
 interface BottomSheetProps {
   isOpen: boolean;
   onClose: () => void;
   title?: string;
-  children: React.ReactNode;
+  children: ReactNode;
   maxHeight?: string;
   showCloseButton?: boolean;
+  canClose?: boolean;
 }
 
-export const BottomSheet: React.FC<BottomSheetProps> = ({
-  isOpen,
-  onClose,
-  title,
-  children,
-  maxHeight = '90dvh',
-  showCloseButton = true,
-}) => {
+export function BottomSheet({ isOpen, onClose, title, children, maxHeight = '90dvh', showCloseButton = true, canClose = true }: BottomSheetProps) {
   const sheetRef = useRef<HTMLDivElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const id = useId();
+  const reducedMotion = useReducedMotion();
+  useDialogAccessibility(sheetRef, isOpen, onClose, canClose);
+  useDialogViewport(viewportRef, isOpen);
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen) {
-        onClose();
-      }
-    };
-    if (isOpen) {
-      document.body.style.overflow = 'hidden';
-      window.addEventListener('keydown', handleKeyDown);
-    } else {
-      document.body.style.overflow = '';
-    }
-    return () => {
-      document.body.style.overflow = '';
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [isOpen, onClose]);
-
-  const handleDragEnd = (_: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
-    // Si glissé vers le bas de plus de 120px ou avec une vitesse positive forte
-    if (info.offset.y > 120 || info.velocity.y > 600) {
-      onClose();
-    }
-  };
-
-  return (
-    <AnimatePresence>
-      {isOpen && (
-        <div className="fixed inset-0 z-50 flex flex-col justify-end">
-          {/* Backdrop avec fondu et léger flou */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.25 }}
-            onClick={onClose}
-            className="fixed inset-0 bg-black/50 backdrop-blur-xs"
-            aria-hidden="true"
-          />
-
-          {/* Feuille coulissante */}
-          <motion.div
-            ref={sheetRef}
-            initial={{ y: '100%' }}
-            animate={{ y: 0 }}
-            exit={{ y: '100%' }}
-            transition={{ type: 'spring', damping: 28, stiffness: 320 }}
-            drag="y"
-            dragConstraints={{ top: 0 }}
-            dragElastic={0.2}
-            dragSnapToOrigin={false}
-            onDragEnd={handleDragEnd}
-            style={{ maxHeight }}
-            role="dialog"
-            aria-modal="true"
-            aria-label={title || 'Feuille contextuelle'}
-            className="relative w-full max-w-lg mx-auto bg-[#f1ece4] text-[#141414] rounded-t-[32px] shadow-2xl flex flex-col overflow-hidden border-t-2 border-[#141414]/10 touch-pan-y"
-          >
-            {/* Poignée de glissement interactive */}
-            <div className="pt-3.5 pb-2 flex justify-center cursor-grab active:cursor-grabbing w-full">
-              <div className="w-12 h-1.5 rounded-full bg-[#141414]/25 hover:bg-[#141414]/40 transition-colors" />
-            </div>
-
-            {/* En-tête */}
-            {(title || showCloseButton) && (
-              <div className="px-6 py-2 flex items-center justify-between border-b border-[#141414]/10">
-                {title ? (
-                  <h3 className="text-lg font-extrabold text-[#141414] tracking-tight">{title}</h3>
-                ) : (
-                  <div />
-                )}
-                {showCloseButton && (
-                  <button
-                    type="button"
-                    onClick={onClose}
-                    className="p-2 -mr-2 rounded-full text-[#141414]/60 hover:text-[#141414] hover:bg-[#141414]/5 transition-colors"
-                    aria-label="Fermer"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* Corps du contenu défilable */}
-            <div className="flex-1 overflow-y-auto px-6 py-4 safe-bottom">
-              {children}
-            </div>
-          </motion.div>
-        </div>
-      )}
-    </AnimatePresence>
-  );
-};
+  return <AnimatePresence>{isOpen && <div ref={viewportRef} className="fixed right-0 left-0 z-50 flex min-w-0 items-end justify-center overflow-hidden pt-4"
+    style={{ top: 'var(--dialog-viewport-top, 0px)', height: 'var(--dialog-viewport-height, 100dvh)' }}>
+    <motion.div aria-hidden="true" initial={false} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: reducedMotion ? 0 : 0.15 }}
+      onClick={() => { if (canClose) onClose(); }} className="absolute inset-0 bg-black/50 backdrop-blur-xs" />
+    <motion.div ref={sheetRef} role="dialog" aria-modal="true" aria-labelledby={title ? id : undefined} aria-label={title ? undefined : 'Feuille contextuelle'} aria-busy={!canClose} tabIndex={-1}
+      initial={reducedMotion ? false : { y: '100%' }} animate={{ y: 0 }} exit={reducedMotion ? { opacity: 0 } : { y: '100%' }}
+      transition={reducedMotion ? { duration: 0 } : { type: 'spring', damping: 28, stiffness: 320 }}
+      style={{ maxHeight: `min(${maxHeight}, calc(var(--dialog-viewport-height, 100dvh) - 16px))` }}
+      className="relative mx-auto flex w-full min-w-0 max-w-lg flex-col overflow-hidden rounded-t-[32px] border-t-2 border-[#141414]/10 bg-[#f1ece4] text-[#141414] shadow-2xl">
+      <div aria-hidden="true" className="flex justify-center pt-3 pb-2"><span className="h-1.5 w-12 rounded-full bg-[#141414]/25" /></div>
+      {(title || showCloseButton) && <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[#141414]/10 px-4 py-2">
+        {title ? <h2 id={id} tabIndex={-1} data-autofocus className="min-w-0 rounded-lg text-lg font-extrabold focus-visible:outline-2 focus-visible:outline-[#4a6cf0]">{title}</h2> : <span />}
+        {showCloseButton && <button type="button" disabled={!canClose} onClick={onClose} aria-label="Fermer" className="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full hover:bg-[#141414]/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0] disabled:cursor-not-allowed disabled:opacity-50"><X aria-hidden="true" size={22} /></button>}
+      </div>}
+      <div className="safe-bottom min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">{children}</div>
+    </motion.div>
+  </div>}</AnimatePresence>;
+}

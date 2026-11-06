@@ -1,5 +1,5 @@
 import React from 'react';
-import { motion } from 'motion/react';
+import { motion, useReducedMotion } from 'motion/react';
 import { Plus } from 'lucide-react';
 
 interface EmptyStateProps {
@@ -8,18 +8,20 @@ interface EmptyStateProps {
 }
 
 export const EmptyState: React.FC<EmptyStateProps> = ({ onOpenUpload, isSearching }) => {
+  const reducedMotion = useReducedMotion();
   return (
     <motion.div
-      initial={{ opacity: 0, scale: 0.95, y: 15 }}
+      initial={reducedMotion ? false : { opacity: 0, scale: 0.95, y: 15 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.95 }}
-      transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+      exit={reducedMotion ? undefined : { opacity: 0, scale: 0.95 }}
+      transition={{ duration: reducedMotion ? 0 : 0.5, ease: [0.16, 1, 0.3, 1] }}
       className="w-full max-w-md mx-auto py-16 px-6 text-center flex flex-col items-center"
     >
       {/* Illustration en SVG : document souriant avec sticker slap */}
       <motion.div
-        animate={{ y: [-4, 4, -4], rotate: [-1.5, 1.5, -1.5] }}
-        transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
+        animate={reducedMotion ? { y: 0, rotate: 0 } : { y: [-4, 4, -4], rotate: [-1.5, 1.5, -1.5] }}
+        transition={reducedMotion ? { duration: 0 } : { duration: 3, repeat: Infinity, ease: 'easeInOut' }}
+        aria-hidden="true"
         className="relative mb-6"
       >
         <svg
@@ -87,21 +89,21 @@ export const EmptyState: React.FC<EmptyStateProps> = ({ onOpenUpload, isSearchin
       </h3>
       <p className="text-sm text-[#141414]/70 mb-8 max-w-xs font-medium">
         {isSearching
-          ? 'Essaie d\'autres termes ou efface ta recherche pour afficher tous tes documents.'
-          : 'Dépose ton premier fichier pour commencer à constituer ta bibliothèque sécurisée.'}
+          ? 'Essayez un autre titre, une école ou une matière. Explorer permet de voir les fichiers accessibles.'
+          : 'Déposez votre premier fichier pour le partager après validation.'}
       </p>
 
       {!isSearching && (
         <motion.button
           type="button"
           onClick={onOpenUpload}
-          whileHover={{ scale: 1.04, rotate: -2 }}
-          whileTap={{ scale: 0.96 }}
-          transition={{ type: 'spring', stiffness: 400, damping: 17 }}
-          className="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-[#ff6a2b] text-white font-extrabold text-sm shadow-[0_6px_20px_rgba(255,106,43,0.35)] hover:bg-[#ff8a4c] transition-colors cursor-pointer"
+          whileHover={reducedMotion ? undefined : { scale: 1.04, rotate: -2 }}
+          whileTap={reducedMotion ? undefined : { scale: 0.96 }}
+          transition={reducedMotion ? { duration: 0 } : { type: 'spring', stiffness: 400, damping: 17 }}
+          className="inline-flex min-h-11 min-w-11 items-center gap-2 px-6 py-3 rounded-full bg-[#ff6a2b] text-[#141414] font-extrabold text-sm shadow-[0_6px_20px_rgba(255,106,43,0.35)] hover:bg-[#ff8a4c] transition-colors motion-reduce:transition-none cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0]"
         >
-          <Plus className="w-4 h-4 stroke-[3]" />
-          <span>+ Déposer un document</span>
+          <Plus aria-hidden="true" className="w-4 h-4 stroke-[3]" />
+          <span>Déposer</span>
         </motion.button>
       )}
     </motion.div>

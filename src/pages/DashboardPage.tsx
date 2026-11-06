@@ -1,454 +1,254 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { motion, AnimatePresence } from 'motion/react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
+import { Compass, LogOut, Plus, Search, Shield, Trash2, UserRound, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import {
-  DocumentItem,
-  FolderItem,
-  CategoryItem,
-  fetchDashboardData,
-  updateDocumentMetadata,
-  deleteDocumentItem,
-  deleteFolderItem,
-} from '../lib/supabase';
-import { SearchHero } from '../components/SearchHero';
-import { CategoryChips } from '../components/CategoryChips';
-import { FolderCard } from '../components/FolderCard';
+import { fetchDashboardData, setDocumentTrash, updateDocumentMetadata } from '../lib/supabase';
+import { createDashboardLibraryController } from '../lib/dashboard-library';
+import { getSupabaseClientState, subscribeSupabaseClient } from '../lib/supabase-config';
+import type { UploadBatchReport } from '../lib/upload-batch';
+import { errorMessage } from '../lib/errors';
 import { FileCard } from '../components/FileCard';
-import { FolderView } from '../components/FolderView';
+import { SearchHero } from '../components/SearchHero';
 import { UploadModal } from '../components/UploadModal';
-import { EmptyState } from '../components/EmptyState';
-import { MobileNav } from '../components/mobile/MobileNav';
+import { MobileNav, type DashboardView } from '../components/mobile/MobileNav';
 import { MobileDashboardHero } from '../components/mobile/MobileDashboardHero';
-import { Search, Plus, LogOut, Shield, X } from 'lucide-react';
 
-export const DashboardPage: React.FC = () => {
+type LibraryController = ReturnType<typeof createDashboardLibraryController>;
+const buttonClass = 'inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0] disabled:cursor-not-allowed disabled:opacity-50';
+
+export function DashboardPage() {
   const { user, signOut, isAdmin } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-
-  const [documents, setDocuments] = useState<DocumentItem[]>([]);
-  const [folders, setFolders] = useState<FolderItem[]>([]);
-  const [categories, setCategories] = useState<CategoryItem[]>([]);
-  const [loadingDocs, setLoadingDocs] = useState<boolean>(true);
-
-  // Recherche & filtres
-  const [searchQuery, setSearchQuery] = useState<string>('');
-  const [debouncedQuery, setDebouncedQuery] = useState<string>('');
-  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
-
-  // Dossier ouvert
-  const [openedFolderId, setOpenedFolderId] = useState<string | null>(null);
-
-  // Upload
-  const [isUploadOpen, setIsUploadOpen] = useState<boolean>(false);
-  const [uploadTargetFolderId, setUploadTargetFolderId] = useState<string | null>(null);
+  const reducedMotion = useReducedMotion();
+  const { client, generation, config: { url: projectUrl } } = useSyncExternalStore(subscribeSupabaseClient, getSupabaseClientState, getSupabaseClientState);
+  const userId = user?.id || '';
+  const libraryRef = useRef<LibraryController | null>(null);
+  const library = useMemo(() => {
+    const controller = createDashboardLibraryController({
+      scope: { userId, projectUrl, generation },
+      isCurrent: () => libraryRef.current === controller && !!userId && !!client
+        && getSupabaseClientState().generation === generation && getSupabaseClientState().client === client,
+      read: async () => {
+        if (!client) throw new Error('Rétablissez la configuration du projet avant de réessayer.');
+        const checkAccount = async () => {
+          const { data, error } = await client.auth.getSession();
+          if (error || data.session?.user.id !== userId) throw new Error('La session a changé. Rechargez la bibliothèque avec le compte actuel.');
+        };
+        await checkAccount();
+        const data = await fetchDashboardData(userId, undefined, client);
+        await checkAccount();
+        return data;
+      },
+    });
+    return controller;
+  }, [userId, projectUrl, generation, client, isAdmin]);
+  // Invalidation dès le rendu, avant le nettoyage des effets de l'ancien compte.
+  libraryRef.current = library;
+  const { documents, loading, error: libraryError } = useSyncExternalStore(library.subscribe, library.getSnapshot, library.getSnapshot);
+  const [view, setView] = useState<DashboardView>('home');
+  const [showTrash, setShowTrash] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [newlyAddedDocId, setNewlyAddedDocId] = useState<string | null>(null);
-
-  // Menu avatar
-  const [isAvatarMenuOpen, setIsAvatarMenuOpen] = useState<boolean>(false);
-  const [isLoggingOut, setIsLoggingOut] = useState<boolean>(false);
-
+  const [isAvatarMenuOpen, setIsAvatarMenuOpen] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const logoutRef = useRef(false);
   const avatarMenuRef = useRef<HTMLDivElement>(null);
+  const avatarButtonRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const resultsHeadingRef = useRef<HTMLHeadingElement>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if ((location.state as any)?.openUpload) {
-      setIsUploadOpen(true);
+    const state: unknown = location.state;
+    if (typeof state !== 'object' || state === null) return;
+    if ('dashboardView' in state && (state.dashboardView === 'home' || state.dashboardView === 'search' || state.dashboardView === 'explore')) {
+      setView(state.dashboardView);
+      setShowTrash('showTrash' in state && state.showTrash === true);
+      setSearchQuery('');
+      setDebouncedQuery('');
     }
+    if ('openUpload' in state && state.openUpload === true) setIsUploadOpen(true);
   }, [location.state]);
-
   useEffect(() => {
-    const handler = setTimeout(() => {
-      setDebouncedQuery(searchQuery.trim());
-    }, 250);
-    return () => clearTimeout(handler);
+    const timer = setTimeout(() => setDebouncedQuery(searchQuery.trim()), 250);
+    return () => clearTimeout(timer);
   }, [searchQuery]);
-
-  const loadData = async () => {
-    if (!user) return;
-    try {
-      setLoadingDocs(true);
-      const data = await fetchDashboardData(user.id, isAdmin);
-      setDocuments(data.documents);
-      setFolders(data.folders);
-      setCategories(data.categories);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoadingDocs(false);
-    }
-  };
-
   useEffect(() => {
-    loadData();
-  }, [user, isAdmin]);
-
+    if (view !== 'search' || isUploadOpen) return;
+    const frame = requestAnimationFrame(() => searchInputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [view, isUploadOpen]);
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (avatarMenuRef.current && !avatarMenuRef.current.contains(e.target as Node)) {
-        setIsAvatarMenuOpen(false);
-      }
+    libraryRef.current = library;
+    setNewlyAddedDocId(null);
+    setActionNotice(null);
+    setSignOutError(null);
+    setSearchQuery('');
+    setDebouncedQuery('');
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    void library.refresh();
+    return () => {
+      library.cancelPending();
+      if (libraryRef.current === library) libraryRef.current = null;
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
     };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  }, [library]);
+  useEffect(() => {
+    if (!isAvatarMenuOpen) return;
+    const outside = (event: MouseEvent) => {
+      if (event.target instanceof Node && !avatarMenuRef.current?.contains(event.target)) setIsAvatarMenuOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setIsAvatarMenuOpen(false);
+      avatarButtonRef.current?.focus();
+    };
+    document.addEventListener('mousedown', outside);
+    document.addEventListener('keydown', escape);
+    return () => { document.removeEventListener('mousedown', outside); document.removeEventListener('keydown', escape); };
+  }, [isAvatarMenuOpen]);
 
-  const handleSignOut = async () => {
+  const selectView = (next: DashboardView) => {
     setIsAvatarMenuOpen(false);
-    setIsLoggingOut(true);
-    setTimeout(async () => {
-      await signOut();
-      navigate('/');
-    }, 450);
+    setShowTrash(false);
+    setView(next);
+    if (next !== 'search') { setSearchQuery(''); setDebouncedQuery(''); }
+    window.scrollTo({ top: 0, behavior: reducedMotion ? 'instant' : 'smooth' });
+    if (next === 'search') requestAnimationFrame(() => searchInputRef.current?.focus());
   };
-
-  const handleDocumentUploaded = (newDoc: DocumentItem, newFolder?: FolderItem) => {
-    setNewlyAddedDocId(newDoc.id);
-    if (newFolder) {
-      setFolders((prev) => [newFolder, ...prev]);
+  const openUpload = () => { setIsAvatarMenuOpen(false); setIsUploadOpen(true); };
+  const handleSignOut = async () => {
+    if (logoutRef.current || !library.isCurrent()) return;
+    logoutRef.current = true;
+    setIsAvatarMenuOpen(false);
+    setSignOutError(null);
+    setIsLoggingOut(true);
+    try { await signOut(); navigate('/'); }
+    catch (error) { if (library.isCurrent()) setSignOutError(errorMessage(error, 'La déconnexion a échoué. Réessayez.')); }
+    finally { logoutRef.current = false; if (library.isCurrent()) setIsLoggingOut(false); }
+  };
+  const checkLibraryScope = () => {
+    if (!library.isCurrent()) throw new Error('Le compte ou le projet a changé. Rechargez la bibliothèque avant de réessayer cette action.');
+  };
+  const handleUpdateDocument = async (id: string, title: string, description: string) => {
+    checkLibraryScope();
+    await updateDocumentMetadata(id, title, description, userId);
+    if (!library.updateDocumentMetadata(id, title, description)) checkLibraryScope();
+  };
+  const handleTrashDocument = async (id: string, deleted: boolean) => {
+    checkLibraryScope();
+    const state = await setDocumentTrash(id, deleted, userId);
+    if (!library.setDocumentTrash(state)) checkLibraryScope();
+    setActionNotice(deleted ? 'Fichier placé dans la corbeille. Vous pouvez le restaurer depuis Explorer → Corbeille.' : 'Fichier restauré. Son statut d’approbation est conservé.');
+    resultsHeadingRef.current?.focus();
+  };
+  const handleDocumentUploaded = (report: UploadBatchReport) => {
+    const previousIds = new Set(library.getSnapshot().documents.map((document) => document.id));
+    if (!library.applyUploadReport(report)) {
+      if (library.isCurrent()) throw new Error('Ce bilan ne correspond pas au compte ou au projet affiché. Actualisez pour vérifier les fichiers confirmés.');
+      return;
     }
-    setDocuments((prev) => [newDoc, ...prev]);
-    setTimeout(() => {
-      setNewlyAddedDocId(null);
+    const added = library.getSnapshot().documents.find((document) => !previousIds.has(document.id) && document.deleted_at === null);
+    if (!added) return;
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    setNewlyAddedDocId(added.id);
+    highlightTimerRef.current = setTimeout(() => {
+      if (library.isCurrent()) setNewlyAddedDocId(null);
+      highlightTimerRef.current = null;
     }, 1500);
   };
 
-  const handleUpdateDocument = async (id: string, title: string, description: string) => {
-    if (!user) return;
-    await updateDocumentMetadata(id, title, description, user.id);
-    setDocuments((prev) =>
-      prev.map((d) => (d.id === id ? { ...d, title, description: description || null } : d))
-    );
-  };
-
-  const handleDeleteDocument = async (id: string, filePath: string) => {
-    if (!user) return;
-    await deleteDocumentItem(id, filePath, user.id);
-    setDocuments((prev) => prev.filter((d) => d.id !== id));
-  };
-
-  const handleDeleteFolder = async (id: string) => {
-    await deleteFolderItem(id);
-    setFolders((prev) => prev.filter((f) => f.id !== id));
-    setDocuments((prev) => prev.filter((d) => d.folder_id !== id));
-    if (openedFolderId === id) setOpenedFolderId(null);
-  };
-
-  // Filtrage
-  const isSearching = Boolean(debouncedQuery.length > 0 || selectedCategoryId !== null);
-  const normalizedQuery = debouncedQuery.toLowerCase();
-
-  const filteredFolders = folders.filter((folder) => {
-    if (selectedCategoryId && folder.category_id !== selectedCategoryId) return false;
-    if (!normalizedQuery) return true;
-    return folder.name.toLowerCase().includes(normalizedQuery);
-  });
-
-  const filteredDocuments = documents.filter((doc) => {
-    if (selectedCategoryId && doc.category_id !== selectedCategoryId) return false;
-    if (!normalizedQuery) return true;
-    return (
-      doc.title.toLowerCase().includes(normalizedQuery) ||
-      (doc.description && doc.description.toLowerCase().includes(normalizedQuery)) ||
-      doc.file_name.toLowerCase().includes(normalizedQuery)
-    );
-  });
-
-  const rootDocuments = filteredDocuments.filter((d) => !d.folder_id);
-
-  const categoryCounts: Record<string, number> = {};
-  categories.forEach((cat) => {
-    const docsCount = documents.filter((d) => d.category_id === cat.id).length;
-    const foldersCount = folders.filter((f) => f.category_id === cat.id).length;
-    categoryCounts[cat.id] = docsCount + foldersCount;
-  });
-
-  const totalItemCount = documents.length + folders.length;
-  const openedFolder = folders.find((f) => f.id === openedFolderId);
-
-  const avatarUrl =
-    user?.user_metadata?.avatar_url ||
-    user?.user_metadata?.picture ||
-    'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=120&auto=format&fit=crop&q=80';
-  const displayName =
-    user?.user_metadata?.full_name || user?.user_metadata?.name || 'Utilisateur';
-  const userEmail = user?.email || 'utilisateur@amphix.site';
-
-  const openUpload = (folderId: string | null) => {
-    setUploadTargetFolderId(folderId);
-    setIsUploadOpen(true);
-  };
+  const activeDocuments = documents.filter((document) => document.deleted_at === null);
+  const trashedDocuments = documents.filter((document) => document.deleted_at !== null);
+  const query = debouncedQuery.toLocaleLowerCase('fr');
+  // Recherche locale existante, sans prétendre au moteur PostgreSQL du LOT 4.
+  const filteredDocuments = (showTrash ? trashedDocuments : activeDocuments).filter((document) => !query
+    || [document.title, document.description, document.file_name, document.school_name, document.subject_name]
+      .some((value) => value?.toLocaleLowerCase('fr').includes(query)));
+  const displayName = user?.user_metadata?.full_name || user?.user_metadata?.name || 'Utilisateur';
+  const avatarUrl = user?.user_metadata?.avatar_url || user?.user_metadata?.picture;
+  const hasResultsView = view === 'explore' || (view === 'search' && !!query);
 
   return (
-    <motion.div
-      animate={{ opacity: isLoggingOut ? 0 : 1 }}
-      transition={{ duration: 0.3 }}
-      style={{ fontFamily: "'DM Sans', 'Manrope', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" }}
-      className="min-h-screen flex flex-col bg-[#f1ece4] text-[#141414] selection:bg-[#ff6a2b] selection:text-[#f1ece4]"
-    >
-      {/* Header */}
-      <header className="w-full sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-[#141414]/10">
-        <div className="max-w-6xl mx-auto px-4 sm:px-8 h-16 flex items-center justify-between gap-4">
-          <Link
-            to="/dashboard"
-            onClick={() => {
-              setSearchQuery('');
-              setSelectedCategoryId(null);
-              setOpenedFolderId(null);
-            }}
-            className="shrink-0 text-xl font-extrabold tracking-[-0.02em] select-none rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#ff6a2b]"
-          >
-            <span className="text-[#141414]">Amphix</span>
-            <span className="text-[#ff6a2b]">Docs</span>
+    <motion.div animate={{ opacity: 1 }} transition={{ duration: reducedMotion ? 0 : 0.2 }}
+      className="flex min-h-dvh min-w-0 flex-col bg-[#f1ece4] text-[#141414] selection:bg-[#ff6a2b] selection:text-[#141414]">
+      <header className="safe-top sticky top-0 z-40 border-b border-[#141414]/10 bg-[#f1ece4]/95 backdrop-blur">
+        <div className="mx-auto flex min-h-16 w-full max-w-6xl items-center justify-between gap-2 px-4 sm:px-8">
+          <Link to="/dashboard" onClick={() => selectView('home')} className="inline-flex min-h-11 shrink-0 items-center rounded-lg text-xl font-extrabold tracking-tight focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0]">
+            Amphix<span className="text-[#ff6a2b]">Docs</span>
           </Link>
-
-          {isSearching && (
-            <motion.div
-              layoutId="search-bar-container"
-              className="flex-1 max-w-xl relative"
-            >
-              <Search className="w-4 h-4 text-[#141414]/40 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                ref={searchInputRef}
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Rechercher un document, un dossier…"
-                className="w-full h-10 pl-9 pr-9 rounded-full bg-white border border-transparent text-sm text-[#141414] placeholder:text-[#141414]/40 hover:border-[#141414]/20 focus:bg-white focus:border-[#4a6cf0] focus:ring-4 focus:ring-[#4a6cf0]/15 focus:outline-hidden transition"
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 rounded-md text-[#141414]/55 hover:bg-[#141414]/10 flex items-center justify-center cursor-pointer"
-                  aria-label="Effacer la recherche"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </motion.div>
-          )}
-
-          <div className="flex items-center gap-3">
-            {isSearching && (
-              <button
-                type="button"
-                onClick={() => openUpload(openedFolderId)}
-                className="hidden sm:inline-flex items-center gap-1.5 h-10 px-4 rounded-full bg-[#4a6cf0] text-[#f1ece4] text-sm font-medium hover:bg-[#3d5ed8] active:bg-[#3552c0] transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff6a2b]"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Déposer</span>
+          <div className="flex min-w-0 items-center gap-2">
+            <button type="button" onClick={() => selectView('explore')} className={`${buttonClass} hidden bg-white md:inline-flex`}><Compass aria-hidden="true" size={18} />Explorer</button>
+            <button type="button" onClick={openUpload} className={`${buttonClass} hidden bg-[#ff6a2b] sm:inline-flex`}><Plus aria-hidden="true" size={18} />Déposer</button>
+            <div ref={avatarMenuRef} className="relative shrink-0">
+              <button ref={avatarButtonRef} type="button" aria-label="Ouvrir le profil" aria-expanded={isAvatarMenuOpen} aria-controls="dashboard-profile-actions"
+                onClick={() => setIsAvatarMenuOpen((current) => !current)} className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-full border border-[#141414]/20 bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0]">
+                {avatarUrl ? <img src={avatarUrl} alt="" className="h-full w-full object-cover" /> : <UserRound aria-hidden="true" size={22} />}
               </button>
-            )}
-
-            {/* Menu profil */}
-            <div className="relative shrink-0" ref={avatarMenuRef}>
-              <button
-                type="button"
-                onClick={() => setIsAvatarMenuOpen((prev) => !prev)}
-                className="w-9 h-9 rounded-full overflow-hidden ring-1 ring-[#141414]/15 hover:ring-[#141414]/30 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff6a2b] cursor-pointer"
-                aria-label="Menu du profil"
-                aria-expanded={isAvatarMenuOpen}
-              >
-                <img src={avatarUrl} alt={displayName} className="w-full h-full object-cover" />
-              </button>
-
               <AnimatePresence>
-                {isAvatarMenuOpen && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -4 }}
-                    transition={{ duration: 0.12 }}
-                    className="absolute right-0 top-11 z-50 w-64 bg-[#f1ece4] rounded-2xl shadow-[0_0_0_4px_#fff,0_18px_40px_rgba(10,16,60,0.35)] p-1.5"
-                  >
-                    <div className="px-3 py-2.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-sm font-medium text-[#141414] truncate">
-                          {displayName}
-                        </p>
-                        {isAdmin && (
-                          <span className="px-1.5 py-0.5 rounded bg-[#ff6a2b] text-[#141414] text-[11px] font-medium">
-                            Admin
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-[#141414]/55 truncate">{userEmail}</p>
-                    </div>
-
-                    <div className="h-px bg-[#141414]/5 my-1" />
-
-                    {isAdmin && (
-                      <Link
-                        to="/admin"
-                        onClick={() => setIsAvatarMenuOpen(false)}
-                        className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-[#141414]/80 rounded-lg hover:bg-[#141414]/5 transition-colors"
-                      >
-                        <Shield className="w-4 h-4 text-[#141414]/55" />
-                        <span>Console admin</span>
-                      </Link>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={handleSignOut}
-                      className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-red-600 rounded-lg hover:bg-red-50 transition-colors text-left cursor-pointer"
-                    >
-                      <LogOut className="w-4 h-4" />
-                      <span>Se déconnecter</span>
-                    </button>
-                  </motion.div>
-                )}
+                {isAvatarMenuOpen && <motion.div id="dashboard-profile-actions" role="group" aria-label="Actions du profil"
+                  initial={reducedMotion ? false : { opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ duration: reducedMotion ? 0 : 0.12 }}
+                  className="absolute right-0 top-13 z-50 w-64 max-w-[calc(100vw-32px)] rounded-2xl border border-[#141414]/15 bg-[#f1ece4] p-2 shadow-xl">
+                  <div className="min-w-0 px-3 py-2"><p className="truncate text-sm font-bold">{displayName}</p>{user?.email && <p className="truncate text-xs text-[#141414]/65">{user.email}</p>}</div>
+                  <button type="button" onClick={() => selectView('explore')} className={`${buttonClass} w-full justify-start hover:bg-white`}><Compass aria-hidden="true" size={18} />Explorer les fichiers</button>
+                  {isAdmin && <Link to="/admin" className={`${buttonClass} w-full justify-start hover:bg-white`}><Shield aria-hidden="true" size={18} />Console admin</Link>}
+                  <button type="button" onClick={() => void handleSignOut()} disabled={isLoggingOut} className={`${buttonClass} w-full justify-start text-red-700 hover:bg-red-50`}><LogOut aria-hidden="true" size={18} />Se déconnecter</button>
+                </motion.div>}
               </AnimatePresence>
             </div>
           </div>
         </div>
       </header>
-
-      {/* Contenu */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-8 py-6 sm:py-10 flex flex-col pb-32 sm:pb-10">
-        {/* Accueil */}
-        {!isSearching && !openedFolderId && (
-          <>
-            <MobileDashboardHero
-              userFirstName={(displayName || 'Ami').split(' ')[0]}
-              searchQuery={searchQuery}
-              onSearchChange={(val) => setSearchQuery(val)}
-              onOpenUpload={() => openUpload(null)}
-              categories={categories}
-              selectedCategoryId={selectedCategoryId}
-              onSelectCategory={setSelectedCategoryId}
-              recentDocuments={documents}
-              recentFolders={folders}
-              onOpenFolder={(id) => setOpenedFolderId(id)}
-            />
-
-            <div className="hidden md:flex flex-1 flex-col">
-              <SearchHero
-                value={searchQuery}
-                onChange={(val) => setSearchQuery(val)}
-                onOpenUpload={() => openUpload(null)}
-              />
-            </div>
-          </>
-        )}
-
-        {/* Dossier ouvert */}
-        {openedFolder && (
-          <FolderView
-            folder={openedFolder}
-            documents={documents}
-            onBack={() => setOpenedFolderId(null)}
-            onOpenUpload={(fId) => openUpload(fId)}
-            onUpdateDocument={handleUpdateDocument}
-            onDeleteDocument={handleDeleteDocument}
-            currentUserId={user?.id || ''}
-            isAdmin={isAdmin}
-          />
-        )}
-
-        {/* Résultats */}
-        {isSearching && !openedFolderId && (
-          <div className="space-y-8">
-            <CategoryChips
-              categories={categories}
-              selectedCategoryId={selectedCategoryId}
-              onSelectCategory={setSelectedCategoryId}
-              counts={categoryCounts}
-              totalCount={totalItemCount}
-            />
-
-            {filteredFolders.length === 0 && rootDocuments.length === 0 ? (
-              <EmptyState isSearching={true} onOpenUpload={() => openUpload(null)} />
-            ) : (
-              <div className="space-y-10">
-                {filteredFolders.length > 0 && (
-                  <section aria-labelledby="folders-title">
-                    <div className="flex items-center gap-2.5 mb-4">
-                      <h2
-                        id="folders-title"
-                        className="inline-block px-3 py-1 rounded-full bg-[#4a6cf0] text-[#f1ece4] text-sm font-semibold"
-                      >
-                        Dossiers
-                      </h2>
-                      <span className="text-sm text-[#141414]/55 tabular-nums">
-                        {filteredFolders.length}
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-                      <AnimatePresence mode="popLayout">
-                        {filteredFolders.map((folder) => (
-                          <FolderCard
-                            key={folder.id}
-                            folder={folder}
-                            onClick={() => setOpenedFolderId(folder.id)}
-                            onDelete={handleDeleteFolder}
-                            canDelete={isAdmin || folder.user_id === user?.id}
-                          />
-                        ))}
-                      </AnimatePresence>
-                    </div>
-                  </section>
-                )}
-
-                {rootDocuments.length > 0 && (
-                  <section aria-labelledby="files-title">
-                    <div className="flex items-center gap-2.5 mb-4">
-                      <h2
-                        id="files-title"
-                        className="inline-block px-3 py-1 rounded-full bg-[#4a6cf0] text-[#f1ece4] text-sm font-semibold"
-                      >
-                        Fichiers
-                      </h2>
-                      <span className="text-sm text-[#141414]/55 tabular-nums">
-                        {rootDocuments.length}
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4">
-                      <AnimatePresence mode="popLayout">
-                        {rootDocuments.map((doc) => (
-                          <FileCard
-                            key={doc.id}
-                            doc={doc}
-                            isNew={doc.id === newlyAddedDocId}
-                            onUpdate={handleUpdateDocument}
-                            onDelete={handleDeleteDocument}
-                            canManage={isAdmin || doc.user_id === user?.id}
-                          />
-                        ))}
-                      </AnimatePresence>
-                    </div>
-                  </section>
-                )}
-              </div>
-            )}
+      <main className="pb-nav mx-auto flex w-full min-w-0 max-w-6xl flex-1 flex-col px-4 pt-6 md:px-8 md:pb-10">
+        {isLoggingOut && <p role="status" className="mb-4 text-sm">Déconnexion en cours…</p>}
+        {signOutError && <div className="mb-4 rounded-2xl border border-red-200 bg-red-50 p-4"><p role="alert" className="break-words text-sm text-red-800">{signOutError}</p><button type="button" disabled={isLoggingOut} onClick={() => void handleSignOut()} className={`${buttonClass} mt-2 bg-white`}>Réessayer la déconnexion</button></div>}
+        {libraryError && <div className="mb-4 rounded-2xl border border-red-200 bg-red-50 p-4">
+          <p role="alert" className="break-words text-sm text-red-800">{libraryError}</p><p className="mt-1 text-xs text-red-800">Les fichiers déjà confirmés restent affichés ; la liste peut être incomplète.</p>
+          <button type="button" onClick={() => void library.refresh()} disabled={loading} className={`${buttonClass} mt-2 bg-white`}>Réessayer le chargement</button>
+        </div>}
+        {actionNotice && <p role="status" className="mb-4 rounded-2xl bg-emerald-50 p-3 text-sm text-emerald-800">{actionNotice}</p>}
+        {view === 'home' ? <>
+          <MobileDashboardHero userFirstName={displayName.split(' ')[0]} searchQuery={searchQuery} onSearchChange={setSearchQuery} onFocusSearch={() => selectView('search')} onOpenUpload={openUpload} />
+          <div className="hidden flex-1 flex-col md:flex"><SearchHero value={searchQuery} onChange={setSearchQuery} onFocusSearch={() => selectView('search')} onOpenUpload={openUpload} /></div>
+        </> : <div className="space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h1 ref={resultsHeadingRef} tabIndex={-1} className="min-w-0 rounded-lg text-2xl font-extrabold tracking-tight focus-visible:outline-2 focus-visible:outline-[#4a6cf0]">{view === 'search' ? 'Recherche' : showTrash ? 'Corbeille' : 'Explorer les fichiers'}</h1>
+            <button type="button" onClick={() => void library.refresh()} disabled={loading} className={`${buttonClass} bg-white`}>Actualiser</button>
           </div>
-        )}
+          <div className="relative min-w-0">
+            <label htmlFor="library-search" className="sr-only">Rechercher par titre, école, matière ou nom de fichier</label>
+            <Search aria-hidden="true" size={20} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#141414]/50" />
+            <input ref={searchInputRef} id="library-search" type="search" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Titre, école, matière…"
+              className="min-h-14 w-full min-w-0 rounded-2xl border-2 border-[#141414] bg-white py-3 pr-14 pl-12 text-base outline-none focus:border-[#4a6cf0] focus:ring-4 focus:ring-[#4a6cf0]/15" />
+            {searchQuery && <button type="button" aria-label="Effacer la recherche" onClick={() => setSearchQuery('')} className="absolute top-1/2 right-1 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full hover:bg-[#f1ece4] focus-visible:outline-2 focus-visible:outline-[#4a6cf0]"><X aria-hidden="true" size={20} /></button>}
+          </div>
+          {view === 'explore' && <div role="group" aria-label="Afficher les fichiers actifs ou la corbeille" className="flex flex-wrap gap-2">
+            <button type="button" aria-pressed={!showTrash} onClick={() => setShowTrash(false)} className={`${buttonClass} ${!showTrash ? 'bg-[#141414] text-white' : 'bg-white'}`}>Fichiers ({activeDocuments.length})</button>
+            <button type="button" aria-pressed={showTrash} onClick={() => setShowTrash(true)} className={`${buttonClass} ${showTrash ? 'bg-[#141414] text-white' : 'bg-white'}`}><Trash2 aria-hidden="true" size={16} />Corbeille ({trashedDocuments.length})</button>
+          </div>}
+          {showTrash && <p className="text-sm text-[#141414]/70">Les fichiers restent conservés. Leur restauration conserve leur statut d’approbation. Aucune suppression définitive n’est proposée.</p>}
+          {loading && <p role="status" className="text-sm text-[#141414]/70">Chargement de la bibliothèque…</p>}
+          {searchQuery.trim() !== debouncedQuery && <p role="status" className="text-sm text-[#141414]/70">Mise à jour de la recherche…</p>}
+          {!hasResultsView ? <p className="rounded-3xl bg-white/60 p-5 text-sm text-[#141414]/70">Saisissez votre recherche, ou choisissez Explorer pour voir les fichiers accessibles.</p> : <>
+            <p role="status" className="text-sm text-[#141414]/70">{filteredDocuments.length} fichier(s) {showTrash ? 'dans la corbeille' : 'accessible(s)'}{libraryError ? ' dans la liste disponible' : ''}.</p>
+            {!filteredDocuments.length && !loading && !libraryError ? <div className="rounded-3xl border border-[#141414]/15 bg-white p-5">
+              <h2 className="text-lg font-bold">{showTrash ? 'La corbeille est vide' : query ? 'Aucun fichier trouvé' : 'Aucun fichier pour le moment'}</h2>
+              <p className="mt-2 text-sm text-[#141414]/70">{query ? 'Essayez un autre titre, une école ou une matière.' : showTrash ? 'Les fichiers retirés apparaîtront ici.' : 'Déposez votre premier fichier pour le partager après validation.'}</p>
+              {!showTrash && <button type="button" onClick={openUpload} className={`${buttonClass} mt-4 bg-[#ff6a2b]`}><Plus aria-hidden="true" size={18} />Déposer</button>}
+            </div> : <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3"><AnimatePresence mode="popLayout">
+              {filteredDocuments.map((document) => <FileCard key={document.id} doc={document} isNew={document.id === newlyAddedDocId} onUpdate={handleUpdateDocument} onTrash={handleTrashDocument} canManage={isAdmin || document.user_id === userId} />)}
+            </AnimatePresence></div>}
+          </>}
+        </div>}
       </main>
-
-      <UploadModal
-        isOpen={isUploadOpen}
-        onClose={() => setIsUploadOpen(false)}
-        categories={categories}
-        folders={folders}
-        initialFolderId={uploadTargetFolderId}
-        onSuccess={handleDocumentUploaded}
-      />
-
-      <MobileNav
-        onOpenUpload={() => openUpload(openedFolderId)}
-        onFocusSearch={() => {
-          if (!isSearching) setSearchQuery(' ');
-          setTimeout(() => searchInputRef.current?.focus(), 150);
-        }}
-        onSelectFoldersTab={() => {
-          if (!isSearching) setSearchQuery(' ');
-        }}
-        isModalOpen={isUploadOpen}
-      />
+      <UploadModal isOpen={isUploadOpen} onClose={() => setIsUploadOpen(false)} documents={documents} onSuccess={handleDocumentUploaded} />
+      <MobileNav activeView={view} onHome={() => selectView('home')} onFocusSearch={() => selectView('search')} onSelectExplorer={() => selectView('explore')} onOpenUpload={openUpload} isModalOpen={isUploadOpen} />
     </motion.div>
   );
-};
+}

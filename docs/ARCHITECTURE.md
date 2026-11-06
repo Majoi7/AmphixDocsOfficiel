@@ -1,6 +1,8 @@
 # Architecture et audit de l’existant — AmphixDocs
 
 > **PHASE 1 — analyse uniquement.** Ce document décrit le code local et les contrôles exécutés. Il ne certifie ni le fonctionnement en production, ni la configuration Google/Supabase, ni les autorisations réellement installées sur une base distante. Aucun correctif applicatif n’a été réalisé pendant l’audit.
+>
+> **Lecture temporelle — mise à jour du 5 novembre 2026 :** les sections 1 à 12 conservent le constat historique de phase 1, y compris ses échecs de contrôle et ses références de lignes. La phase 2 locale a depuis été autorisée : son état de reprise et les nouvelles preuves sont consignés en [section 13](#13-reprise-locale-des-contrats--5-novembre-2026). Ne pas interpréter un constat ancien comme l’état actuel, ni une réussite locale comme une validation distante.
 
 Documents associés : [ROADMAP.md](ROADMAP.md), [CHECKLIST_MANUELLE.md](CHECKLIST_MANUELLE.md), [instructions de travail](../CLAUDE.md).
 
@@ -621,3 +623,113 @@ La phase 1 livre ce constat, la roadmap et la checklist, puis s’arrête. **Auc
 - Décision sur la contradiction de traduction du footer protégé, sans supposer une exception à son immutabilité.
 
 Ces décisions sont des dépendances de la phase 2, pas des manipulations externes déjà réalisées. Suivre [ROADMAP.md](ROADMAP.md) dans l’ordre et conserver les preuves de [CHECKLIST_MANUELLE.md](CHECKLIST_MANUELLE.md).
+
+## 13. Reprise locale des contrats — 5 novembre 2026
+
+Cette section décrit le sous-lot de reprise sur la branche `fix/reprise-contrats-depot`. Les corrections locales sont autorisées ; **aucun accès Supabase distant, changement OAuth, SQL distant ou déploiement n’a été effectué**. Les sections précédentes restent le constat historique de phase 1. Les P0 globaux ne sont pas achevés par les seules preuves ci-dessous.
+
+### 13.1. Modules et frontières
+
+| Module | Responsabilité actuelle | Limite de preuve |
+| --- | --- | --- |
+| `src/lib/database.types.ts` | Contrat `Database` conservateur et relations issus des SQL versionnés. | Non généré depuis la base distante et non comparé au schéma installé. |
+| `src/lib/supabase-config.ts` / client dans `src/lib/supabase.ts` | Configuration URL/clé atomique, client nullable et génération de configuration. | Format valide ne signifie ni service joignable ni session Google vérifiée. |
+| `src/lib/auth-session.ts` / `src/context/AuthContext.tsx` | État de session/profil/rôle, vérification du compte et invalidation des réponses obsolètes. | Pas de test direct d’AuthContext, de son contrôleur ou d’OAuth dans les 72 tests. |
+| `ProtectedRoute.tsx` / `AdminRoute.tsx` | Attente, refus, erreur et réessai selon la session et le rôle résolu. | Guards React, pas autorité des droits SQL/Storage. |
+| Helpers de dépôt dans `src/lib/supabase.ts` | Identité stable, contrôle de session, transfert et réconciliation Storage/SQL. | API simulées ; protocole sans transaction commune ni suivi serveur durable. |
+| `src/lib/upload-batch.ts` | Orchestration, rapports cumulatifs, resélection et journal de reprise. | Stockage navigateur local, pas verrou atomique multi-onglets. |
+| `src/lib/dashboard-library.ts` | Snapshot atomique, lectures concurrentes et mutations confirmées. | Contrôleur indépendant de React, testé sans DOM. |
+| `UploadModal.tsx` / `DashboardPage.tsx` | Formulaire et bilan par fichier, consommation de tout le rapport, chargement/erreur/réessai. | Raccordement écrit et typé ; parcours navigateur/StrictMode non exécutés. |
+| `src/hooks/useDialogAccessibility.ts` | Focus initial/confiné/restauré, Échap selon l’état et verrou de scroll. | Correction statique ; clavier, dialogues empilés et appareils non recettés. |
+
+### 13.2. Configuration et authentification
+
+- La configuration locale et la configuration d’environnement sont traitées comme des **paires URL/clé** : aucune URL d’un projet n’est mélangée à la clé d’un autre. Une paire locale invalide ne bascule pas silencieusement vers un autre projet.
+- Le client peut être `null` lorsque la configuration manque ou est invalide. Chaque changement de client porte une génération ; les consommateurs doivent ignorer les réponses appartenant à un ancien compte/client/projet.
+- Les formats de clé secrète ne sont pas acceptés côté navigateur. La configuration publique n’est pas une preuve de connexion et ne remplace pas les RLS. HTTPS est requis hors développement local autorisé.
+- L’authentification utilise PKCE, un stockage lié au projet et une vérification du compte par `getUser` avec le jeton de la session concernée. Les états de chargement, de rôle et d’erreur sont explicites ; une erreur de profil ne doit pas conclure à un rôle ordinaire fictif.
+- Les guards attendent le rôle résolu et l’administration exige `profiles.role = 'admin'`. Ces changements ne démontrent pas les privilèges effectivement installés.
+- Les scénarios de configuration absente/invalide, stockage bloqué, changement rapide de compte/projet, erreur de rôle et déconnexion restent à tester directement. Les tests de relations simulent une session pour exercer les helpers, pas AuthContext ni Google OAuth.
+
+### 13.3. Identités, réconciliation et lots de dépôt
+
+Avant toute écriture, le dépôt prépare un UUID, un chemin dans le préfixe du compte, les métadonnées/destinations figées et une empreinte SHA-256 des octets. La limite est `20 * 1024 * 1024`, soit **20 971 520 octets par fichier** ; la description utilise au plus **200 points de code Unicode**. SQL et le bucket doivent conserver leurs propres contrôles.
+
+Le chemin est stable et l’upload utilise `upsert: false` : une reprise ne fabrique pas une nouvelle identité et ne remplace pas silencieusement un contenu existant. Les helpers distinguent les échecs `retryable`, `uncertain`, `conflict` et `scope`.
+
+Le protocole de reprise :
+
+1. Vérifier requête, projet, génération pertinente et compte Auth avant les écritures.
+2. Rechercher la ligne SQL sous la même identité/propriété et comparer ses métadonnées.
+3. Vérifier l’objet Storage par ses octets, sa taille et son empreinte lorsque la réponse est incertaine ou que l’opération est reprise. **Un 404 Storage générique ne prouve pas l’absence** ; un conflit de contenu bloque la reprise sans nettoyage destructeur.
+4. Si un nouveau transfert est nécessaire, vérifier l’original sélectionné puis envoyer sans UPSERT. Une réponse Storage perdue est réconciliée avant un éventuel nouvel envoi.
+5. Enregistrer les métadonnées initiales `pending`. Après une réponse SQL perdue, rechercher la même identité plutôt que réinsérer sous un autre UUID.
+6. Confirmer l’objet et les métadonnées avant de publier la réussite. Ne pas supprimer aveuglément un objet qui peut déjà être référencé par un INSERT réussi dont la réponse a été perdue.
+
+`runUploadBatch` crée/réconcilie le dossier avant les fichiers, conserve les succès et continue après un échec intermédiaire sauf changement de scope. Dans le même lot en mémoire, les fichiers confirmés ne sont pas rejoués et les conflits ne sont pas relancés automatiquement. Les rapports `UploadBatchReport` contiennent **tous** les documents confirmés, le dossier éventuel et le bilan par entrée ; ils sont cumulatifs et peuvent être répétés.
+
+Les exceptions de notification/affichage restent distinctes des confirmations distantes. Une notification peut être réessayée sans nouvelle mutation. Une réponse d’un ancien compte/projet ne doit pas être publiée dans la bibliothèque du nouveau scope.
+
+La progression est exprimée par étapes, pas par pourcentage chronométré : préparation, transfert avec volume envoyé non mesuré, enregistrement, vérification, puis fichier et métadonnées confirmés. Aucun test local n’a mesuré un transfert Supabase réel.
+
+### 13.4. Journal navigateur et restauration
+
+Le journal est enregistré **et relu avant un nouvel envoi**. Sa clé et sa validation lient la trace au compte et au projet. La liste blanche conserve version, identité du lot/dossier/documents, chemins, métadonnées/destinations figées et SHA-256 ; **aucun jeton, clé, profil, octet de fichier ou ancien état de confirmation** n’est enregistré.
+
+- Une sauvegarde inspecte la trace existante et compare toutes les requêtes canoniques, pas seulement l’UUID du lot. Une autre trace ou une trace incompatible est conservée et bloque l’envoi.
+- Les erreurs d’accès au stockage et les écritures non confirmées empêchent tout nouvel envoi.
+- La restauration remet toutes les identités en vérification : une ancienne confirmation locale n’est pas une preuve distante. Si l’objet est absent et que l’original est nécessaire, la personne doit resélectionner un fichier correspondant au nom, à la taille et à l’empreinte, sans changer les métadonnées figées.
+- Une resélection incompatible ne remplace pas la sélection originale déjà conservée.
+- Seul un lot complet correspondant à la trace peut demander son retrait. Le retrait est relu pour confirmer l’absence ; il est idempotent si la trace est déjà absente. Si le retrait échoue, un avertissement indique qu’une prochaine ouverture revérifiera la trace.
+- Fermer le modal ne transforme pas un lot incomplet en réussite et n’efface pas sa trace.
+
+**Limites durables :** le journal est propre au navigateur/appareil et les données du site peuvent disparaître. Les vérifications lecture/écriture ne constituent pas un verrou entre onglets ; une course reste possible. Ce mécanisme n’est ni une transaction SQL/Storage, ni un journal serveur, ni une file de transferts hors-ligne ou une promesse de synchronisation PWA automatique.
+
+### 13.5. Bibliothèque et raccordement du dashboard
+
+`createDashboardLibraryController` publie ensemble documents, dossiers, catégories, chargement et erreur. Le scope compte/projet/génération est copié à la création. Une lecture obsolète ne publie plus après une lecture plus récente, une invalidation ou un changement de scope ; `cancelPending()` invalide les réponses, **sans simuler un abort réseau**.
+
+Les mutations reçues pendant une lecture sont réappliquées à sa réponse. Les rapports sont dédupliqués, les compteurs sont recalculés sur les enfants effectivement visibles et les identités déjà traitées/dossiers supprimés sont mémorisés. Un ancien rapport ne rétablit pas une suppression ou d’anciennes métadonnées. Une lecture ultérieure reste autoritative sur les droits et les éléments devenus absents ; les protections locales vivent pendant la vie du contrôleur, pas dans une base durable.
+
+Le dashboard consomme le snapshot avec `useSyncExternalStore`, contrôle le client/génération courant et raccorde le **rapport complet** du modal. Les updates/deletes de l’interface ne sont appliqués qu’après confirmation du helper. Chargement, erreur avec Réessayer et absence de résultat sont séparés ; une erreur conserve les données disponibles et annonce leur possible incomplétude. La déconnexion attend l’opération réelle et expose son erreur, sans minuteur simulant une réussite.
+
+Les animations directement touchées ont des gardes reduced-motion. Le hook de dialogue choisit `data-autofocus` parmi les contrôles utilisables, excluant notamment `:disabled` sous un `fieldset disabled`, les éléments cachés/inert et les contrôles non visibles ; il prévoit un fallback sur un contrôle utilisable ou le dialogue. **Ces corrections ne sont pas une recette DOM/accessibilité.**
+
+Les écarts de parcours antérieurs restent ouverts : fichiers en dossier absents des résultats racine, accueil mobile avec catégories/récents avant recherche, navigation par espace trimé/hash et références de secours du profil. Ils relèvent des P0/P1 concernés et ne sont pas résolus par les tests du contrôleur.
+
+### 13.6. Contrôles exécutés et portée
+
+| Contrôle | Résultat de la reprise | Ce qu’il ne prouve pas |
+| --- | --- | --- |
+| `npx tsc --noEmit` | Réussi. Le calcul numérique sur une étape de dépôt a été remplacé par le contrat d’étapes/bilan. | Droits serveur, OAuth ou comportement navigateur. |
+| `npm run build` | Réussi : 2 163 modules, manifest et service worker générés, précache de 22 entrées. | Validation TypeScript à lui seul ou qualification PWA réelle. |
+| `npm run lint` | Réussi ; toujours `tsc --noEmit`. | Véritable lint ESLint. |
+| `scripts/test-upload-batch.mjs` | **27/27** : lots, scopes, callbacks, restauration/resélection et protections du journal. | Transfert réel de 20 Mo, verrou multi-onglets, rendu du modal. |
+| `scripts/test-dashboard-library.mjs` | **21/21** : snapshot, lectures concurrentes, mutations, rapports/tombstones et scopes. | React StrictMode, effets de montage/nettoyage et DOM. |
+| `scripts/test-relations.mjs` | **18/18** : dix tests relations/modération et huit scénarios de reprises/réponses perdues/conflits/session incompatible. | PostgreSQL, Storage et RLS installées. |
+| `scripts/test-security-sql.mjs` | **6/6** contrôles textuels de V4. | Syntaxe/exécution PostgreSQL, migrations réexécutées ou privilèges effectifs. |
+
+Commande du run groupé :
+
+```powershell
+node --test --test-reporter=spec scripts/test-upload-batch.mjs scripts/test-dashboard-library.mjs scripts/test-relations.mjs scripts/test-security-sql.mjs
+```
+
+Résultat : **72 tests, 72 réussites, zéro échec/annulation/skipped**, exit 0, durée **105 112,4954 ms**. Les runners ferment normalement Vite ; le dernier run n’a pas émis d’avertissement WebSocket. Vite 8 distingue `hmr` et `ws` : l’isolation utilise désormais `configFile: false`, `envDir: false`, absence de découverte des entrées, `watch: null`, **`hmr: false` et `ws: false`**. Les API sont simulées ou le réseau est interdit, avec restauration des globals et sans `process.exit`.
+
+Le build conserve un chunk principal de **833,99 kB**, **243,24 kB gzip**, supérieur au seuil d’avertissement de 500 kB. Des avertissements de durée des callbacks PWA/Tailwind sont également affichés ; ils ne constituent pas un échec. Aucun changement de dépendance, lockfile, esbuild ou footer protégé n’a été effectué pour les masquer.
+
+Les exclusions Git de `.env`, `.env.local`, `.env.production`, `dist/` et `graphify-out/` ont été vérifiées sans lire leurs valeurs. Seul `.env.example` apparaît parmi les chemins `.env*` suivis. Cela ne remplace pas l’examen du périmètre réellement stagé avant un commit.
+
+**Graphify :** le graphe existe, mais la mise à jour du delta courant n’est pas confirmée. Les dernières tentatives de `python -m graphify . --update` ont été bloquées avant exécution par l’indisponibilité du classificateur de permissions. L’ancien résultat de 314 nœuds/742 liens reste historique ; une requête sans résultat final connu ne prouve pas une mise à jour. Ne pas contourner les permissions ni lancer de rebuild complet pour ce delta.
+
+### 13.7. Dépendances et validations encore ouvertes
+
+- Comparaison du contrat `Database` au schéma installé, exécution/réexécution autorisées de V3/V4 et tests SQL **et Storage** avec A/B/admin.
+- Configuration et Auth directement testées, Google OAuth réel, restauration/renouvellement de session, erreurs de rôle et déconnexion.
+- Protocole durable de suppression/reprise Storage/SQL, gestion serveur des effets partiels et décisions sur les dossiers/statuts/champs auteurs/rôles. P0-05 reste ouverte.
+- Recette React/StrictMode, modal fermé/rouvert, scope changé pendant préparation/transfert, lectures tardives, erreurs de notification et timers.
+- Clavier/focus/scroll de fond, reduced-motion complet, safe areas, 320 px et iOS/Android ; installation/mise à jour/hors-ligne et absence de cache Supabase.
+- Mise à jour Graphify du delta, examen Git final et clôture locale ; pas de push ou de livraison distante implicite.
+
+Les scénarios manuels sont ajoutés à [CHECKLIST_MANUELLE.md](CHECKLIST_MANUELLE.md) **sans les cocher**. Les sous-lots localement testés sont distingués des P0 globaux dans [ROADMAP.md](ROADMAP.md).

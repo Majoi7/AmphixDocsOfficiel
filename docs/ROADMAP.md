@@ -19,7 +19,24 @@ Références : [ARCHITECTURE.md](ARCHITECTURE.md), [CHECKLIST_MANUELLE.md](CHECK
 - Ne jamais modifier `components/ui/sticker-slap-footer.tsx` ou son re-export pour contourner les contraintes. Footer configuré uniquement par les props de son appel, sans réseaux sociaux ni credits.
 - Aucun secret dans les sources, les logs ou les preuves. Les variables `VITE_*` sont publiques ; aucune clé `service_role`, privée Google ou Gemini dans le navigateur.
 - Préserver DM Sans, la palette, les arrondis et les animations via `motion/react`, tout en respectant reduced-motion et l’accessibilité. Tailwind reste en v4 ; l’alias `@/*` reste interprété selon sa configuration réelle vers la racine.
-- Après les modifications de code, utiliser `python -m graphify . --update`, jamais un rebuild complet. Le graphe local existe désormais. L’extraction complète a échoué faute de clé pour les documents/images ; la dernière mise à jour `--update --code-only` a réussi (314 nœuds, 742 liens). Les SQL ne sont pas indexés faute de `tree_sitter_sql` : leurs vérifications restent ciblées et distinctes du graphe.
+- Après les modifications de code, utiliser `python -m graphify . --update`, jamais un rebuild complet. Le graphe local existe désormais. La mise à jour historique `--update --code-only` avait réussi (314 nœuds, 742 liens), après un échec d’extraction complète faute de clé pour les documents/images. Les SQL n’étaient pas indexés faute de `tree_sitter_sql` : leurs vérifications restent ciblées et distinctes du graphe. **Pour le delta de reprise du 5 novembre 2026, aucune mise à jour n’est encore confirmée** : les dernières tentatives ont été bloquées avant lancement par l’indisponibilité du classificateur de permissions. Ne pas présenter ce graphe historique comme synchronisé avec les nouveaux contrats.
+
+### État du sous-lot de reprise — 5 novembre 2026
+
+Ce sous-lot remet en cohérence les contrats locaux interrompus ; il **ne termine pas les P0 globaux et ne contourne pas leurs dépendances serveur**. Les validations externes de P0-02, le protocole durable de P0-05 et les décisions produit restent requis avant de qualifier le dépôt complet.
+
+- [x] Stabiliser l’orchestration de dépôt et son journal local : identités figées, bilan cumulatif, reprise des seuls échecs dans un lot en mémoire, revérification de toutes les identités restaurées et protection d’une autre trace. **27 tests de module réussis** ; ni transfert Supabase réel ni concurrence atomique entre onglets démontrés.
+- [x] Vérifier le contrôleur atomique de bibliothèque : lectures obsolètes, mutations confirmées pendant une lecture, rapports répétés, suppressions et scopes compte/projet/génération. **21 tests de module réussis** ; cela ne teste pas React StrictMode ou les effets du dashboard dans un DOM.
+- [x] Remettre le runner relations/modération/reprises en cohérence avec les helpers actuels : **18 tests API simulés réussis**, dont huit scénarios de réponse perdue, conflit ou scope Auth incompatible. Les dix tests historiques de relations/modération sont conservés.
+- [x] Revérifier les sources par `npx tsc --noEmit`, `npm run build` et `npm run lint`, et exécuter les **six contrôles SQL textuels**. Le run groupé termine à **72/72**, sans avertissement WebSocket et avec fermeture normale des runners ; ceux-ci isolent Vite avec `configFile: false`, `envDir: false`, `hmr: false` et `ws: false`.
+- [ ] Vérifier directement configuration/Auth, guards et raccordement React du dashboard/modal : montages/nettoyages StrictMode, changement de compte/projet/rôle, erreurs et focus réel. Ces parcours ne sont pas couverts par les 72 tests.
+- [ ] Actualiser le delta Graphify par mise à jour incrémentale et conserver son résultat ; aucune réussite actuelle ne peut être déduite de l’ancien graphe.
+
+**État du code local :** contrat `Database` conservateur dérivé des SQL versionnés, client Supabase nullable et configuration URL/clé atomique ; session et rôle explicites sans succès démo de secours ; dépôt UUID/chemin/SHA-256, réconciliation Storage/SQL et modal consommant `UploadBatchReport` ; dashboard raccordé au contrôleur et affichant chargement/erreur/réessai. Ces changements sont réalisés localement, mais le contrat `Database` n’a pas été comparé au schéma installé et OAuth/RLS/Storage réels restent non vérifiés. Les erreurs et confirmations de l’administration complète restent à recetter.
+
+**Résultat du build :** service worker généré, chunk principal **833,99 kB** (**243,24 kB gzip**) ; avertissements de taille > 500 kB et de durée de callbacks PWA persistants. Le lint reste un alias TypeScript, pas ESLint. Aucun changement de dépendance/lockfile/esbuild, aucun changement du footer protégé, aucune opération distante ou suppression de fichier dans ce sous-lot.
+
+Détails des contrats et limites : [ARCHITECTURE.md, section 13](ARCHITECTURE.md#13-reprise-locale-des-contrats--5-novembre-2026). Les nouvelles recettes de journal, scopes et focus restent décochées dans [CHECKLIST_MANUELLE.md](CHECKLIST_MANUELLE.md).
 
 ## 2. Ordre et dépendances
 

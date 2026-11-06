@@ -1,348 +1,221 @@
-import React, { useState } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
-import { getStoredSupabaseConfig, reinitializeSupabase } from '../lib/supabase';
-import { useAuth } from '../context/AuthContext';
+import React, { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
+import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
 import {
-  X,
-  Key,
-  ExternalLink,
-  Check,
-  AlertTriangle,
-  Sparkles,
-  HelpCircle,
-  Copy,
-  ShieldCheck,
-  Globe,
-} from 'lucide-react';
+  getSupabaseClientState, subscribeSupabaseClient, reinitializeSupabase, resetSupabaseConfig,
+} from '../lib/supabase';
+import { errorMessage } from '../lib/errors';
+import { useAuth } from '../context/AuthContext';
+import { useDialogAccessibility } from '../hooks/useDialogAccessibility';
+import { X, Key, ExternalLink, Check, AlertTriangle, Copy } from 'lucide-react';
 
 interface SupabaseConfigModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onConnectRealGoogle?: () => void;
 }
 
-export const SupabaseConfigModal: React.FC<SupabaseConfigModalProps> = ({
-  isOpen,
-  onClose,
-  onConnectRealGoogle,
-}) => {
-  const { isConfigured, signInDemoUser, signInWithGoogle, lastAuthError, setLastAuthError } = useAuth();
-  const currentConfig = getStoredSupabaseConfig();
-
-  const [url, setUrl] = useState(currentConfig.url || '');
-  const [key, setKey] = useState(currentConfig.key || '');
-  const [savedSuccess, setSavedSuccess] = useState(false);
+export const SupabaseConfigModal: React.FC<SupabaseConfigModalProps> = ({ isOpen, onClose }) => {
+  const { user, sessionStatus, roleError, signInWithGoogle, lastAuthError, setLastAuthError } = useAuth();
+  const { config } = useSyncExternalStore(subscribeSupabaseClient, getSupabaseClientState, getSupabaseClientState);
+  const [url, setUrl] = useState(config.url);
+  const [key, setKey] = useState(config.key);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
-  const [authError, setAuthError] = useState<string | null>(null);
   const [isTesting, setIsTesting] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const urlId = useId();
+  const keyId = useId();
+  const reducedMotion = useReducedMotion();
+  useDialogAccessibility(dialogRef, isOpen, onClose, !isTesting);
 
-  // Synchroniser avec l'erreur passée par l'AuthContext
-  const activeError = authError || lastAuthError;
-  const isSignupDisabled = activeError && activeError.toLowerCase().includes('signup');
+  useEffect(() => {
+    if (!isOpen) return;
+    const saved = getSupabaseClientState().config;
+    setUrl(saved.url);
+    setKey(saved.key);
+    setNotice(null);
+    setActionError(null);
+    setCopiedField(null);
+  }, [isOpen]);
 
-  // Détection si l'application est exécutée dans un iframe
   const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
   const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
-  const projectRef = url.match(/https:\/\/([a-z0-9-]+)\.supabase\.co/i)?.[1] || 'rxekjxttxbhylzjepibc';
-  const callbackUrl = `https://${projectRef}.supabase.co/auth/v1/callback`;
-  const supabaseDashboardAuthUrl = `https://supabase.com/dashboard/project/${projectRef}/auth/users`;
+  const callbackUrl = config.isConfigured ? `${config.url}/auth/v1/callback` : null;
+  const projectRef = config.isConfigured
+    ? new URL(config.url).hostname.match(/^([a-z0-9-]+)\.supabase\.co$/i)?.[1]
+    : null;
+  const dashboardUrl = projectRef
+    ? `https://supabase.com/dashboard/project/${projectRef}/auth/providers`
+    : 'https://supabase.com/dashboard';
+  const activeError = actionError || lastAuthError || config.error;
+  const signupDisabled = lastAuthError?.includes('signup_disabled');
+  const sourceLabel = config.source === 'local' ? 'paire enregistrée dans ce navigateur'
+    : config.source === 'environment' ? 'variables publiques de l’environnement' : 'aucune configuration';
 
-  const copyToClipboard = (text: string, fieldName: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedField(fieldName);
-    setTimeout(() => setCopiedField(null), 2000);
-  };
-
-  const handleSaveConfig = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!url.trim() || !key.trim()) return;
-    reinitializeSupabase(url.trim(), key.trim());
-    setSavedSuccess(true);
-    setTimeout(() => {
-      setSavedSuccess(false);
-      window.location.reload();
-    }, 1200);
-  };
-
-  const handleTestGoogle = async () => {
+  const copyToClipboard = async (text: string, name: string) => {
+    setActionError(null);
     try {
-      setIsTesting(true);
-      setAuthError(null);
+      if (!navigator.clipboard) throw new Error('Le presse-papiers n’est pas disponible. Sélectionnez et copiez le texte manuellement.');
+      await navigator.clipboard.writeText(text);
+      setCopiedField(name);
+    } catch (error) {
+      setActionError(errorMessage(error, 'La copie a échoué. Copiez le texte manuellement.'));
+    }
+  };
+
+  const handleSaveConfig = (event: React.FormEvent) => {
+    event.preventDefault();
+    setActionError(null);
+    setNotice(null);
+    try {
+      const result = reinitializeSupabase(url, key);
+      setUrl(result.config.url);
+      setKey(result.config.key);
       setLastAuthError(null);
+      setNotice('Configuration enregistrée. Son format est valide ; cela ne vérifie ni le projet distant, ni Google, ni une session. Le compte et le rôle sont rechargés pour ce projet.');
+    } catch (error) {
+      setActionError(errorMessage(error, 'La configuration n’a pas été enregistrée. Vérifiez les champs puis réessayez.'));
+    }
+  };
+
+  const handleReset = () => {
+    setActionError(null);
+    setNotice(null);
+    try {
+      const result = resetSupabaseConfig();
+      setUrl(result.config.url);
+      setKey(result.config.key);
+      setLastAuthError(null);
+      setNotice('La paire locale a été retirée. Les variables publiques de l’environnement sont de nouveau utilisées, si elles sont valides.');
+    } catch (error) {
+      setActionError(errorMessage(error, 'La configuration locale n’a pas pu être réinitialisée. Réessayez.'));
+    }
+  };
+
+  const handleGoogle = async () => {
+    setIsTesting(true);
+    setActionError(null);
+    try {
       await signInWithGoogle();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Échec de la connexion OAuth Google';
-      setAuthError(msg);
+    } catch (error) {
+      setActionError(errorMessage(error, 'La connexion n’a pas pu démarrer. Réessayez.'));
     } finally {
       setIsTesting(false);
     }
   };
 
+  const buttonClass = 'px-4 py-2.5 rounded-full text-xs font-bold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0] disabled:opacity-50';
+
   return (
     <AnimatePresence>
       {isOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
-          {/* Overlay sombre */}
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6">
           <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            onClick={onClose}
-            className="fixed inset-0 bg-[#141414]/60 backdrop-blur-xs cursor-pointer"
+            aria-hidden="true"
+            initial={reducedMotion ? false : { opacity: 0 }} animate={{ opacity: 1 }}
+            exit={{ opacity: reducedMotion ? 1 : 0 }} transition={{ duration: reducedMotion ? 0 : 0.2 }}
+            onClick={() => { if (!isTesting) onClose(); }}
+            className="fixed inset-0 bg-[#141414]/60 backdrop-blur-xs"
           />
-
-          {/* Fenêtre modale */}
           <motion.div
-            initial={{ scale: 0.95, opacity: 0, y: 15 }}
-            animate={{ scale: 1, opacity: 1, y: 0 }}
-            exit={{ scale: 0.95, opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 350, damping: 24 }}
-            className="relative w-full max-w-2xl bg-white rounded-[28px] border-3 border-[#141414] shadow-[12px_18px_0px_#141414] p-6 sm:p-8 z-10 max-h-[90vh] overflow-y-auto"
+            ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
+            initial={reducedMotion ? false : { scale: 0.95, opacity: 0, y: 15 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ opacity: reducedMotion ? 1 : 0 }}
+            transition={reducedMotion ? { duration: 0 } : { type: 'spring', stiffness: 350, damping: 24 }}
+            className="relative w-full min-w-0 max-w-2xl bg-white rounded-[28px] border-3 border-[#141414] shadow-[6px_8px_0px_#141414] p-5 sm:p-8 z-10 max-h-[90dvh] overflow-y-auto overscroll-contain"
           >
-            {/* En-tête */}
-            <div className="flex items-center justify-between pb-4 border-b-2 border-[#f1ece4] mb-6">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-2xl bg-[#ff6a2b]/15 flex items-center justify-center text-[#ff6a2b]">
-                  <Key className="w-5 h-5" />
-                </div>
+            <div className="flex items-start justify-between gap-3 pb-4 border-b-2 border-[#f1ece4] mb-5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <Key className="w-6 h-6 text-[#ff6a2b] shrink-0" aria-hidden="true" />
                 <div>
-                  <h3 className="font-[800] text-xl sm:text-2xl text-[#141414] tracking-tight">
-                    Activer la connexion Google
-                  </h3>
-                  <p className="text-xs text-[#141414]/60 font-medium">
-                    Guide complet de dépannage et configuration Supabase
-                  </p>
+                  <h2 id={titleId} className="font-extrabold text-xl text-[#141414]">Connexion et configuration</h2>
+                  <p className="text-xs text-[#141414]/70 mt-1">Supabase et connexion Google réelle</p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={onClose}
-                className="w-8 h-8 rounded-full flex items-center justify-center text-[#141414]/60 hover:text-[#141414] hover:bg-[#f1ece4] transition-colors"
-                aria-label="Fermer"
-              >
+              <button type="button" data-autofocus onClick={onClose} disabled={isTesting}
+                className={`${buttonClass} p-2! bg-[#f1ece4] shrink-0`} aria-label="Fermer la configuration">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Alerte si dans un iframe (problème n°1 pour Google OAuth) */}
+            <div className="rounded-2xl bg-[#f1ece4]/60 p-3 text-xs space-y-1 mb-4">
+              <p><strong>Configuration :</strong> {config.isConfigured ? 'format valide, disponibilité non vérifiée' : config.status === 'invalid' ? 'invalide' : 'absente'}.</p>
+              <p><strong>Source :</strong> {sourceLabel}.</p>
+              <p><strong>Session :</strong> {sessionStatus === 'loading' ? 'vérification en cours…' : sessionStatus === 'error' ? 'vérification en erreur' : user ? 'compte vérifié auprès de Supabase Auth' : 'aucun compte connecté'}.</p>
+              {roleError && <p>Le rôle du profil n’a pas pu être vérifié. Réessayez depuis votre espace.</p>}
+            </div>
+            {config.storageWarning && <p role="status" className="mb-4 text-xs text-[#141414] bg-[#ffd23f]/20 p-3 rounded-xl">{config.storageWarning}</p>}
+            {activeError && (
+              <div role="alert" className="mb-4 p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs break-words">
+                <p className="font-bold flex gap-2 items-start"><AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />{activeError}</p>
+                {signupDisabled && <p className="mt-2">Vérifiez la politique d’inscription dans Supabase. Ne l’assouplissez que si cela correspond au produit et que vous avez l’autorisation adaptée.</p>}
+              </div>
+            )}
+            {notice && <p role="status" className="mb-4 text-xs bg-green-50 text-green-900 border border-green-200 rounded-xl p-3">{notice}</p>}
+
             {isInIframe && (
-              <div className="mb-6 p-4 rounded-2xl bg-[#ff6a2b]/10 border-2 border-[#ff6a2b] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                <div className="flex items-start gap-2.5">
-                  <AlertTriangle className="w-5 h-5 text-[#ff6a2b] shrink-0 mt-0.5" />
-                  <div className="text-xs text-[#141414]">
-                    <span className="font-extrabold block text-sm text-[#ff6a2b] mb-0.5">
-                      Contrainte de sécurité Google (iFrame)
-                    </span>
-                    Google interdit expressément l'affichage de sa mire de connexion dans les cadres intégrés (iframes). Pour vous connecter avec Google, ouvrez l'application dans un **onglet dédié**.
-                  </div>
-                </div>
-                <a
-                  href={window.location.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="shrink-0 inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#ff6a2b] text-white text-xs font-extrabold shadow-sm hover:bg-[#ff8a4c] transition-colors"
-                >
-                  <span>Ouvrir en plein écran</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
+              <div className="mb-5 p-3 rounded-xl bg-[#ff6a2b]/10 text-xs space-y-2">
+                <p>Google et le stockage de session peuvent bloquer la connexion dans un cadre intégré. Démarrez et terminez OAuth dans le même onglet dédié.</p>
+                <a href={`${currentOrigin}${window.location.pathname}`} target="_blank" rel="noopener noreferrer"
+                  className={`${buttonClass} inline-flex items-center gap-2 bg-[#ff6a2b] text-white`}>
+                  Ouvrir l’application dans un onglet <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
                 </a>
               </div>
             )}
 
-            {/* Alerte spécifique si signup_disabled */}
-            {isSignupDisabled ? (
-              <div className="mb-6 p-4 rounded-2xl bg-[#ff6a2b]/15 border-2 border-[#ff6a2b] flex flex-col gap-2.5 text-xs">
-                <div className="flex items-center gap-2 text-sm font-extrabold text-[#141414]">
-                  <AlertTriangle className="w-5 h-5 text-[#ff6a2b] shrink-0" />
-                  <span>Action requise dans Supabase : Autoriser les inscriptions</span>
-                </div>
-                <p className="text-[#141414]/85 leading-relaxed">
-                  Votre projet Supabase bloque actuellement les nouveaux comptes (erreur <code>signup_disabled</code>). C'est normal sur un nouveau projet.
-                </p>
-                <div className="p-3 bg-white rounded-xl border border-[#ff6a2b]/30 space-y-1.5 font-medium">
-                  <p className="font-bold text-[#141414]">Comment l'activer en 30 secondes :</p>
-                  <p>1. Allez dans votre dashboard Supabase : <strong>Authentication &gt; Sign In / Up</strong> (ou <strong>Configuration &gt; General</strong>).</p>
-                  <p>2. Cochez / activez l'interrupteur : <strong>« Allow new users to sign up »</strong> (Autoriser les nouvelles inscriptions).</p>
-                  <p>3. Cliquez sur <strong>Save</strong> en bas de la page.</p>
-                </div>
-                <div className="flex items-center justify-between pt-1">
-                  <a
-                    href={supabaseDashboardAuthUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#ff6a2b] text-white font-extrabold text-xs shadow-xs hover:bg-[#ff8a4c] transition-colors"
-                  >
-                    <span>Ouvrir les paramètres Authentication Supabase</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAuthError(null);
-                      setLastAuthError(null);
-                    }}
-                    className="text-[11px] font-bold text-[#141414]/60 hover:text-[#141414]"
-                  >
-                    Fermer cette alerte
+            <form onSubmit={handleSaveConfig} className="p-4 rounded-2xl bg-[#ffd23f]/10 border-2 border-[#ffd23f] space-y-3">
+              <h3 className="text-sm font-extrabold">Paire Supabase publique</h3>
+              <p className="text-xs text-[#141414]/75">La paire locale remplace entièrement celle de l’environnement. Elle n’est jamais complétée avec une clé d’une autre source.</p>
+              <div>
+                <label htmlFor={urlId} className="block text-xs font-bold mb-1">URL du projet</label>
+                <input id={urlId} type="url" value={url} required disabled={isTesting} spellCheck={false} autoComplete="off"
+                  placeholder="https://votre-projet.supabase.co" onChange={(event) => { setUrl(event.target.value); setNotice(null); }}
+                  className="w-full min-w-0 text-xs font-mono px-3 py-2 rounded-xl bg-white border border-[#141414]/30 focus-visible:outline-2 focus-visible:outline-[#4a6cf0]" />
+              </div>
+              <div>
+                <label htmlFor={keyId} className="block text-xs font-bold mb-1">Clé publique publishable ou anon</label>
+                <input id={keyId} type="password" value={key} required disabled={isTesting} spellCheck={false} autoComplete="off"
+                  placeholder="Clé publique du projet" onChange={(event) => { setKey(event.target.value); setNotice(null); }}
+                  className="w-full min-w-0 text-xs font-mono px-3 py-2 rounded-xl bg-white border border-[#141414]/30 focus-visible:outline-2 focus-visible:outline-[#4a6cf0]" />
+              </div>
+              <p className="text-xs text-[#141414]/75">Jamais de clé service_role, secret Supabase, clé privée Google ou Gemini ici. Les variables VITE_* sont publiques dans le navigateur.</p>
+              <div className="flex flex-wrap gap-2">
+                <button type="submit" disabled={isTesting} className={`${buttonClass} bg-[#141414] text-white`}>Enregistrer la paire</button>
+                <button type="button" disabled={isTesting} onClick={handleReset} className={`${buttonClass} bg-white border border-[#141414]/25`}>Rétablir l’environnement</button>
+              </div>
+              <p className="text-xs text-[#141414]/70">Un changement de projet recharge la session et le rôle. Aucun rechargement de page ou compte de démonstration n’est nécessaire.</p>
+            </form>
+
+            <section className="mt-5 text-xs space-y-3">
+              <h3 className="text-sm font-extrabold">Vérifications manuelles Google / Supabase</h3>
+              <p>Dans Google Cloud, l’ID client OAuth doit être de type Web. L’URI de redirection est celle du projet enregistré ci-dessus :</p>
+              {callbackUrl ? (
+                <div className="flex items-start gap-2 p-3 bg-[#f1ece4]/60 rounded-xl">
+                  <code className="break-all min-w-0 flex-1">{callbackUrl}</code>
+                  <button type="button" disabled={isTesting} onClick={() => { void copyToClipboard(callbackUrl, 'callback'); }}
+                    aria-label="Copier l’URI de redirection Google" className={`${buttonClass} p-1! shrink-0`}>
+                    {copiedField === 'callback' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                   </button>
                 </div>
+              ) : <p>Enregistrez une paire valide avant de calculer l’URI de redirection. Aucune référence de projet par défaut n’est utilisée.</p>}
+              <p>Dans Supabase, vérifiez le provider Google et ses identifiants privés <strong>uniquement côté Supabase</strong>, puis les URL autorisées. Ajoutez cette redirection applicative :</p>
+              <div className="flex items-start gap-2 p-3 bg-[#f1ece4]/60 rounded-xl">
+                <code className="break-all min-w-0 flex-1">{currentOrigin}/dashboard</code>
+                <button type="button" disabled={isTesting} onClick={() => { void copyToClipboard(`${currentOrigin}/dashboard`, 'redirect'); }}
+                  aria-label="Copier l’URL de retour vers le dashboard" className={`${buttonClass} p-1! shrink-0`}>
+                  {copiedField === 'redirect' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                </button>
               </div>
-            ) : activeError ? (
-              <div className="mb-6 p-3.5 rounded-xl bg-[#e11d48]/10 border border-[#e11d48]/30 flex items-start gap-2 text-xs font-bold text-[#e11d48]">
-                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-black">Erreur d'authentification Supabase :</p>
-                  <p className="font-mono text-[11px] mt-0.5">{activeError}</p>
-                </div>
-              </div>
-            ) : null}
-
-            {/* Étapes détaillées */}
-            <div className="space-y-6">
-              {/* Étape 1 : Google Cloud Console */}
-              <div className="p-4 rounded-2xl bg-[#f1ece4]/50 border border-[#141414]/15">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="w-6 h-6 rounded-full bg-[#4a6cf0] text-white font-extrabold text-xs flex items-center justify-center">
-                    1
-                  </span>
-                  <h4 className="font-extrabold text-sm text-[#141414]">
-                    Google Cloud Console : ID client OAuth Web
-                  </h4>
-                </div>
-                <p className="text-xs text-[#141414]/70 mb-3 leading-relaxed">
-                  Dans votre console Google Cloud (<em>Identifiants &gt; Créer un ID client OAuth &gt; Application Web</em>), ajoutez cette URI exacte dans <strong>« URI de redirection autorisés »</strong> :
-                </p>
-                <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-white border border-[#141414]/20 font-mono text-xs">
-                  <span className="truncate text-[#4a6cf0] font-semibold">{callbackUrl}</span>
-                  <button
-                    type="button"
-                    onClick={() => copyToClipboard(callbackUrl, 'callback')}
-                    className="p-1.5 rounded-lg hover:bg-[#f1ece4] text-[#141414]/70 shrink-0"
-                    title="Copier"
-                  >
-                    {copiedField === 'callback' ? <Check className="w-4 h-4 text-green-600" /> : <Copy className="w-4 h-4" />}
-                  </button>
-                </div>
-              </div>
-
-              {/* Étape 2 : Supabase Provider & URL */}
-              <div className="p-4 rounded-2xl bg-[#f1ece4]/50 border border-[#141414]/15">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="w-6 h-6 rounded-full bg-[#4a6cf0] text-white font-extrabold text-xs flex items-center justify-center">
-                    2
-                  </span>
-                  <h4 className="font-extrabold text-sm text-[#141414]">
-                    Dashboard Supabase : Activer Google & URLs
-                  </h4>
-                </div>
-                <ul className="text-xs text-[#141414]/70 space-y-2 mb-3">
-                  <li>
-                    • Allez dans <strong>Authentication &gt; Providers &gt; Google</strong> : activez le bouton et collez votre <em>Client ID</em> et <em>Client Secret</em> Google.
-                  </li>
-                  <li>
-                    • Allez dans <strong>Authentication &gt; URL Configuration</strong> : ajoutez dans <em>Redirect URLs</em> :
-                  </li>
-                </ul>
-                <div className="flex items-center justify-between gap-2 p-2.5 rounded-xl bg-white border border-[#141414]/20 font-mono text-xs">
-                  <span className="truncate text-[#141414] font-semibold">{currentOrigin}/dashboard</span>
-                  <button
-                    type="button"
-                    onClick={() => copyToClipboard(`${currentOrigin}/dashboard`, 'redirect')}
-                    className="p-1.5 rounded-lg hover:bg-[#f1ece4] text-[#141414]/70 shrink-0"
-                    title="Copier"
-                  >
-                    {copiedField === 'redirect' ? <Check className="w-4 h-4 text-green-600" /> : <Copy className="w-4 h-4" />}
-                  </button>
-                </div>
-              </div>
-
-              {/* Étape 3 : Renseigner les clés Supabase */}
-              <div className="p-4 rounded-2xl bg-[#ffd23f]/15 border-2 border-[#ffd23f]">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2">
-                    <span className="w-6 h-6 rounded-full bg-[#141414] text-white font-extrabold text-xs flex items-center justify-center">
-                      3
-                    </span>
-                    <h4 className="font-extrabold text-sm text-[#141414]">
-                      Renseigner vos identifiants Supabase
-                    </h4>
-                  </div>
-                  {isConfigured && (
-                    <span className="px-2 py-0.5 rounded-full bg-green-100 text-green-800 text-[10px] font-bold flex items-center gap-1">
-                      <ShieldCheck className="w-3 h-3" /> Connecté
-                    </span>
-                  )}
-                </div>
-
-                <form onSubmit={handleSaveConfig} className="space-y-3">
-                  <div>
-                    <label className="block text-[11px] font-bold text-[#141414] mb-1">
-                      Project URL (ex : https://xyzcompany.supabase.co)
-                    </label>
-                    <input
-                      type="url"
-                      placeholder="https://votre-projet.supabase.co"
-                      value={url}
-                      onChange={(e) => setUrl(e.target.value)}
-                      className="w-full text-xs font-mono px-3 py-2 rounded-xl bg-white border border-[#141414]/20 focus:border-[#ff6a2b] focus:outline-hidden"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-[11px] font-bold text-[#141414] mb-1">
-                      Anon Public Key (clé API publique anon)
-                    </label>
-                    <input
-                      type="password"
-                      placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-                      value={key}
-                      onChange={(e) => setKey(e.target.value)}
-                      className="w-full text-xs font-mono px-3 py-2 rounded-xl bg-white border border-[#141414]/20 focus:border-[#ff6a2b] focus:outline-hidden"
-                    />
-                  </div>
-
-                  <div className="flex items-center justify-between pt-2">
-                    <span className="text-[11px] text-[#141414]/60">
-                      Enregistré localement dans votre navigateur
-                    </span>
-                    <button
-                      type="submit"
-                      className="px-4 py-2 rounded-full bg-[#141414] text-white font-bold text-xs hover:bg-[#333] transition-colors flex items-center gap-1.5"
-                    >
-                      {savedSuccess ? (
-                        <>
-                          <Check className="w-3.5 h-3.5 text-green-400" />
-                          <span>Sauvegardé !</span>
-                        </>
-                      ) : (
-                        <span>Enregistrer les clés</span>
-                      )}
-                    </button>
-                  </div>
-                </form>
-              </div>
-            </div>
-
-            {/* Actions rapides en bas */}
-            <div className="mt-8 pt-4 border-t-2 border-[#f1ece4] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  onClose();
-                  signInDemoUser();
-                }}
-                className="px-4 py-2.5 rounded-full bg-[#f1ece4] text-[#141414] font-bold text-xs hover:bg-[#e7e1d7] transition-colors flex items-center justify-center gap-1.5"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-[#ff6a2b]" />
-                <span>Tester tout de suite en Mode Découverte</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleTestGoogle}
-                disabled={isTesting}
-                className="px-6 py-2.5 rounded-full bg-[#ff6a2b] text-white font-extrabold text-xs hover:bg-[#ff8a4c] transition-colors flex items-center justify-center gap-1.5 shadow-md disabled:opacity-60"
-              >
-                {isTesting ? 'Ouverture…' : 'Tester la connexion Google'}
+              <p aria-live="polite">{copiedField ? 'URL copiée dans le presse-papiers.' : 'Ces indications ne constituent pas une validation OAuth ou RLS du projet distant.'}</p>
+              <a href={dashboardUrl} target="_blank" rel="noopener noreferrer" className="inline-flex gap-1.5 items-center font-bold text-[#4a6cf0] underline focus-visible:outline-2">
+                Ouvrir le dashboard Supabase <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
+              </a>
+            </section>
+            <div className="mt-5 pt-4 border-t-2 border-[#f1ece4] flex justify-end">
+              <button type="button" onClick={() => { void handleGoogle(); }} disabled={isTesting || !config.isConfigured || isInIframe}
+                className={`${buttonClass} bg-[#ff6a2b] text-white`}>
+                {isTesting ? 'Démarrage de la connexion…' : 'Se connecter avec Google'}
               </button>
             </div>
           </motion.div>

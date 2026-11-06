@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion, useReducedMotion } from 'motion/react';
-import { UploadCloud, Search, FolderTree } from 'lucide-react';
+import { UploadCloud, Search, GraduationCap } from 'lucide-react';
 
 const FEATURES = [
   {
@@ -13,13 +13,13 @@ const FEATURES = [
     icon: Search,
     title: 'Retrouver',
     description:
-      'Recherchez par titre, description ou nom de fichier. Les résultats s’affichent au fil de la frappe.',
+      'Recherchez par titre, école, matière, description ou nom de fichier. Les résultats s’affichent au fil de la frappe.',
   },
   {
-    icon: FolderTree,
-    title: 'Organiser',
+    icon: GraduationCap,
+    title: 'Explorer',
     description:
-      'Classez vos documents par dossier et par catégorie. Chaque type de fichier a son étiquette.',
+      'Identifiez l’école et la matière de vos fichiers. Les documents approuvés sont accessibles aux autres membres.',
   },
 ];
 
@@ -29,17 +29,17 @@ export const Features: React.FC = () => {
   return (
     <section className="w-full max-w-6xl mx-auto px-4 sm:px-8 py-14 sm:py-20">
       <motion.div
-        initial={{ opacity: 0, y: reduceMotion ? 0 : 16 }}
+        initial={reduceMotion ? false : { opacity: 0, y: 16 }}
         whileInView={{ opacity: 1, y: 0 }}
         viewport={{ once: true, margin: '-60px' }}
-        transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+        transition={{ duration: reduceMotion ? 0 : 0.5, ease: [0.16, 1, 0.3, 1] }}
       >
         <div className="max-w-xl mb-10 sm:mb-12">
           <h2 className="text-3xl sm:text-5xl font-extrabold tracking-[-0.03em] leading-[1.1] text-[#141414] mb-4">
-            Trois gestes, et c’est rangé.
+            Déposer, retrouver, partager.
           </h2>
           <p className="text-base sm:text-lg text-[#141414]/65 leading-relaxed">
-            Une interface qui va à l’essentiel : déposer un fichier, le retrouver, le classer.
+            Une interface qui va à l’essentiel : déposer des fichiers, les retrouver et explorer les documents approuvés.
           </p>
         </div>
 
