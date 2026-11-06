@@ -8,3 +8,10 @@ coverage/
 !.env.example
 graphify-out/
 dev-dist/
+
+.env
+.env.local
+dist/
+dev-dist/
+graphify-out/
+.claude/worktrees/
