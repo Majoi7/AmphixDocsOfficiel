@@ -130,7 +130,7 @@ export function AdminPage() {
 
   return (
     <div className="flex min-h-dvh min-w-0 flex-col bg-[#f1ece4] text-[#141414] selection:bg-[#ff6a2b] selection:text-[#141414]">
-      <header className="sticky top-0 z-40 border-b border-[#141414]/10 bg-[#f1ece4]/90 pt-safe-top backdrop-blur">
+      <header className="safe-top sticky top-0 z-40 border-b border-[#141414]/10 bg-[#f1ece4]/90 backdrop-blur">
         <div className="mx-auto flex min-h-16 max-w-6xl items-center justify-between gap-2 px-4 sm:px-8">
           <div className="flex min-w-0 items-center gap-2">
             <Link to="/dashboard" className={`${buttonClass} px-0 text-xl font-extrabold tracking-tight`} aria-label="AmphixDocs, retour à l’accueil">
@@ -210,10 +210,7 @@ export function AdminPage() {
           </section>
         )}
       </main>
-      <MobileNav onOpenUpload={() => navigate('/dashboard', { state: { openUpload: true } })}
-        onFocusSearch={() => navigate('/dashboard', { state: { dashboardView: 'search' } })}
-        onSelectExplorer={() => navigate('/dashboard', { state: { dashboardView: 'explore' } })}
-        isModalOpen={interaction || isLoggingOut} />
+      <MobileNav isModalOpen={interaction || isLoggingOut} />
     </div>
   );
 }

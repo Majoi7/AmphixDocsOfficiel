@@ -22,12 +22,12 @@ export const HowItWorks: React.FC = () => {
   const reduceMotion = useReducedMotion();
 
   return (
-    <section className="w-full max-w-6xl mx-auto px-3 sm:px-6 py-10 sm:py-16">
+    <section id="comment-ca-marche" tabIndex={-1} aria-label="Comment ça marche" className="scroll-mt-20 w-full max-w-6xl mx-auto px-3 sm:px-6 py-10 sm:py-16 focus-visible:outline-2 focus-visible:outline-[#ff6a2b]">
       <motion.div
         initial={{ opacity: 0, y: reduceMotion ? 0 : 16 }}
         whileInView={{ opacity: 1, y: 0 }}
         viewport={{ once: true, margin: '-60px' }}
-        transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+        transition={{ duration: reduceMotion ? 0 : 0.5, ease: [0.16, 1, 0.3, 1] }}
         className="rounded-[24px] bg-[#4a6cf0] text-[#f1ece4] px-6 sm:px-12 py-12 sm:py-16"
       >
         <div className="max-w-xl mb-10 sm:mb-14">

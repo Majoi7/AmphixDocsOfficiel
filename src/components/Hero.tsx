@@ -1,6 +1,6 @@
-import React, { useRef, useState } from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { motion } from 'motion/react';
+import { motion, useReducedMotion } from 'motion/react';
 import { Loader2, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { GoogleIcon } from './GoogleIcon';
@@ -15,7 +15,7 @@ export const Hero: React.FC = () => {
   const { user, signInWithGoogle, startPageTransition } = useAuth();
   const [connecting, setConnecting] = useState(false);
   const navigate = useNavigate();
-  const sectionRef = useRef<HTMLElement>(null);
+  const reducedMotion = useReducedMotion();
 
   const handleAuth = async () => {
     try {
@@ -31,21 +31,20 @@ export const Hero: React.FC = () => {
     }
   };
 
-  // scrollIntoView marche quel que soit l'élément qui défile (fenêtre ou conteneur)
-  const scrollToNext = () => {
-    const target = sectionRef.current?.nextElementSibling ?? sectionRef.current;
-    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const showHowItWorks = () => {
+    const target = document.getElementById('comment-ca-marche');
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView({ behavior: reducedMotion ? 'instant' : 'smooth', block: 'start' });
   };
 
   const fade = (delay: number, y = 16) => ({
-    initial: { opacity: 0, y },
+    initial: { opacity: reducedMotion ? 1 : 0, y: reducedMotion ? 0 : y },
     animate: { opacity: 1, y: 0 },
-    transition: { duration: 0.6, delay, ease: EASE },
+    transition: { duration: reducedMotion ? 0 : 0.6, delay: reducedMotion ? 0 : delay, ease: EASE },
   });
 
   return (
     <section
-      ref={sectionRef}
       style={{ fontFamily: FONT }}
       className="relative w-full overflow-clip bg-[#f1ece4] text-[#141414]"
     >
@@ -67,7 +66,7 @@ export const Hero: React.FC = () => {
         />
       </div>
 
-      <div className="relative flex min-h-[calc(100svh-4rem)] flex-col items-center justify-center px-6 py-14">
+      <div className="relative flex min-h-[calc(100svh-4rem)] min-w-0 flex-col items-center justify-center px-4 sm:px-6 py-14">
         <motion.p
           {...fade(0, -12)}
           className="mb-8 flex items-center gap-3 text-sm font-semibold text-[#141414]/55"
@@ -79,7 +78,7 @@ export const Hero: React.FC = () => {
 
         <motion.h1
           {...fade(0.15, 20)}
-          className="flex flex-col items-center gap-1 text-center text-5xl md:text-7xl lg:text-8xl font-extrabold tracking-[-0.04em] leading-[1.02]"
+          className="flex min-w-0 max-w-full flex-col items-center gap-1 text-center text-[clamp(2.25rem,10.5vw,3rem)] md:text-7xl lg:text-8xl font-extrabold tracking-[-0.04em] leading-[1.02]"
         >
           <span>Vos cours</span>
           <span>et vos épreuves,</span>
@@ -109,13 +108,13 @@ export const Hero: React.FC = () => {
 
         <motion.div
           {...fade(0.55, 12)}
-          className="mt-10 flex flex-col sm:flex-row items-stretch sm:items-center gap-3"
+          className="mt-10 flex w-full max-w-full flex-col sm:w-auto sm:flex-row items-stretch sm:items-center gap-3"
         >
           {user ? (
             <button
               type="button"
               onClick={() => navigate('/dashboard')}
-              className="inline-flex items-center justify-center h-12 px-7 rounded-full bg-[#4a6cf0] text-[#f1ece4] text-base font-semibold hover:bg-[#3d5ed8] hover:-rotate-2 active:scale-95 transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#ff6a2b]"
+              className="inline-flex items-center justify-center min-h-12 min-w-0 px-4 sm:px-7 py-3 rounded-full bg-[#4a6cf0] text-[#f1ece4] text-base font-semibold hover:bg-[#3d5ed8] hover:-rotate-2 active:scale-95 transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#ff6a2b]"
             >
               Ouvrir mes documents
             </button>
@@ -124,7 +123,7 @@ export const Hero: React.FC = () => {
               type="button"
               disabled={connecting}
               onClick={handleAuth}
-              className="inline-flex items-center justify-center gap-3 h-12 px-7 rounded-full bg-[#4a6cf0] text-[#f1ece4] text-base font-semibold hover:bg-[#3d5ed8] hover:-rotate-2 active:scale-95 transition cursor-pointer disabled:opacity-70 disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#ff6a2b]"
+              className="inline-flex items-center justify-center gap-3 min-h-12 min-w-0 px-4 sm:px-7 py-3 rounded-full bg-[#4a6cf0] text-[#f1ece4] text-base font-semibold hover:bg-[#3d5ed8] hover:-rotate-2 active:scale-95 transition cursor-pointer disabled:opacity-70 disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#ff6a2b]"
             >
               {connecting ? (
                 <>
@@ -144,8 +143,8 @@ export const Hero: React.FC = () => {
 
           <button
             type="button"
-            onClick={scrollToNext}
-            className="inline-flex items-center justify-center h-12 px-7 rounded-full bg-white text-[#141414] text-base font-semibold hover:-rotate-2 active:scale-95 transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#ff6a2b]"
+            onClick={showHowItWorks}
+            className="inline-flex items-center justify-center min-h-12 min-w-0 px-4 sm:px-7 py-3 rounded-full bg-white text-[#141414] text-base font-semibold hover:-rotate-2 active:scale-95 transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#ff6a2b]"
           >
             Voir comment ça marche
           </button>
@@ -153,7 +152,7 @@ export const Hero: React.FC = () => {
 
         <motion.p
           {...fade(0.7, 8)}
-          className="mt-6 flex items-center gap-2 text-sm text-[#141414]/55"
+          className="mt-6 flex max-w-full items-center gap-2 text-sm text-[#141414]/55"
         >
           <ShieldCheck className="w-4 h-4 shrink-0" />
           <span>Connexion sécurisée, sans mot de passe</span>

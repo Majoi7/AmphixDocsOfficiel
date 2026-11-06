@@ -1,5 +1,6 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useReducedMotion } from 'motion/react';
 import { Navbar } from '../components/Navbar';
 import { Hero } from '../components/Hero';
 import { Features } from '../components/Features';
@@ -7,47 +8,31 @@ import { HowItWorks } from '../components/HowItWorks';
 import { CtaBanner } from '../components/CtaBanner';
 import StickerSlapFooter from '../components/ui/sticker-slap-footer';
 import { useAuth } from '../context/AuthContext';
+import { dashboardUrl } from '../lib/library-navigation';
 
 export const LandingPage: React.FC = () => {
   const navigate = useNavigate();
   const { user, signInWithGoogle } = useAuth();
+  const reducedMotion = useReducedMotion();
 
-  // Adapter l'info-bulle d'accessibilité en français pour le bouton copier email sans modifier le composant
-  useEffect(() => {
-    const updateEmailTooltip = () => {
-      const copyBtn = document.querySelector<HTMLButtonElement>('.ssf-copy');
-      if (copyBtn && copyBtn.getAttribute('title') !== "Copier l'adresse e-mail") {
-        copyBtn.setAttribute('title', "Copier l'adresse e-mail");
-      }
-    };
-    updateEmailTooltip();
-    const observer = new MutationObserver(updateEmailTooltip);
-    observer.observe(document.body, { childList: true, subtree: true });
-    return () => observer.disconnect();
-  }, []);
-
-  // Interception des clics pour naviguer via React Router sans rechargement ou déclencher Google Auth
+  // Les destinations viennent des props du footer, jamais du texte des liens.
   const handleFooterClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement | null;
-    const anchor = target?.closest('a');
-    if (!anchor) return;
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const anchor = e.target instanceof Element ? e.target.closest('a') : null;
+    if (!anchor || anchor.target === '_blank' || anchor.hasAttribute('download')) return;
 
     const href = anchor.getAttribute('href');
-    if (href === '/dashboard') {
+    if (href === '/dashboard' || href?.startsWith('/dashboard?')) {
       e.preventDefault();
-      e.stopPropagation();
-      const linkText = anchor.textContent?.trim().toLowerCase() || '';
-      const isUploadLink = linkText.includes('déposer');
       if (user) {
-        navigate('/dashboard', { state: isUploadLink ? { openUpload: true } : undefined });
+        void navigate(href);
       } else {
-        signInWithGoogle();
+        void signInWithGoogle().catch(() => undefined); // L’erreur est affichée par AuthContext.
       }
     } else if (href === '/') {
       e.preventDefault();
-      e.stopPropagation();
-      navigate('/');
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      void navigate('/');
+      window.scrollTo({ top: 0, behavior: reducedMotion ? 'instant' : 'smooth' });
     }
   };
 
@@ -67,8 +52,8 @@ export const LandingPage: React.FC = () => {
           navLabel=""
           jobsLabel="explorer"
           jobs={[
-            { title: "mes documents", href: "/dashboard" },
-            { title: "déposer un document", href: "/dashboard" },
+            { title: "explorer les documents", href: dashboardUrl('explore') },
+            { title: "déposer un document", href: dashboardUrl('home', { panel: 'upload' }) },
           ]}
           officeLabel="amphixdocs"
           address={["tes documents,", "enfin bien rangés."]}

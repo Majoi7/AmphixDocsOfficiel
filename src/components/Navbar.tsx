@@ -30,8 +30,8 @@ export const Navbar: React.FC = () => {
   };
 
   return (
-    <header className="sticky top-0 z-40 w-full bg-[#f1ece4]/90 backdrop-blur border-b border-[#141414]/10">
-      <div className="w-full max-w-6xl mx-auto px-4 sm:px-8 h-16 flex items-center justify-between">
+    <header className="safe-top sticky top-0 z-40 w-full bg-[#f1ece4]/90 backdrop-blur border-b border-[#141414]/10">
+      <div className="w-full min-w-0 max-w-6xl mx-auto px-4 sm:px-8 min-h-16 flex items-center justify-between gap-2">
         <Link
           to="/"
           className="text-xl font-extrabold tracking-[-0.02em] select-none rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#ff6a2b]"
@@ -45,9 +45,10 @@ export const Navbar: React.FC = () => {
           <button
             type="button"
             onClick={goToDashboard}
-            className="inline-flex items-center h-10 px-5 rounded-full bg-[#4a6cf0] text-[#f1ece4] text-sm font-semibold hover:bg-[#3d5ed8] hover:-rotate-2 active:scale-95 transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff6a2b]"
+            className="inline-flex min-w-0 items-center justify-center min-h-10 px-3 sm:px-5 py-2 rounded-full bg-[#4a6cf0] text-[#f1ece4] text-sm font-semibold hover:bg-[#3d5ed8] hover:-rotate-2 active:scale-95 transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff6a2b]"
           >
-            Ouvrir le dashboard
+            <span className="sm:hidden">Bibliothèque</span>
+            <span className="hidden sm:inline">Ouvrir le dashboard</span>
           </button>
         ) : (
           <button

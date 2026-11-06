@@ -25,7 +25,7 @@ export function ProfileBottomSheet({ isOpen, onClose, onExplore }: ProfileBottom
     busyRef.current = true;
     setIsSigningOut(true);
     setError(null);
-    try { await signOut(); onClose(); navigate('/'); }
+    try { await signOut(); navigate('/', { replace: true }); }
     catch (cause) { if (mountedRef.current) setError(errorMessage(cause, 'La déconnexion a échoué. Réessayez.')); }
     finally { busyRef.current = false; if (mountedRef.current) setIsSigningOut(false); }
   };
@@ -39,8 +39,8 @@ export function ProfileBottomSheet({ isOpen, onClose, onExplore }: ProfileBottom
         {avatar ? <img src={avatar} alt="" className="h-12 w-12 shrink-0 rounded-full border-2 border-[#ff6a2b] object-cover" /> : <UserRound aria-hidden="true" size={32} className="shrink-0 text-[#ff6a2b]" />}
         <div className="min-w-0 flex-1"><p className="truncate font-extrabold">{name}</p>{user?.email && <p className="truncate text-xs text-[#141414]/70">{user.email}</p>}<span className="mt-2 inline-flex rounded-full bg-[#ffd23f]/50 px-2 py-1 text-xs font-bold">{isAdmin ? 'Administrateur' : 'Membre'}</span></div>
       </div>
-      {isAdmin && <button type="button" disabled={isSigningOut} onClick={() => { onClose(); navigate('/admin'); }} className={`${buttonClass} border-[#ffd23f] bg-[#ffd23f]/25 hover:bg-[#ffd23f]/40`}><Shield aria-hidden="true" size={22} className="shrink-0" />Console admin</button>}
-      <button type="button" disabled={isSigningOut} onClick={() => { onClose(); onExplore(); }} className={`${buttonClass} border-[#141414]/10 bg-white hover:bg-neutral-50`}><Compass aria-hidden="true" size={22} className="shrink-0" />Explorer les fichiers</button>
+      {isAdmin && <button type="button" disabled={isSigningOut} onClick={() => navigate('/admin', { replace: true })} className={`${buttonClass} border-[#ffd23f] bg-[#ffd23f]/25 hover:bg-[#ffd23f]/40`}><Shield aria-hidden="true" size={22} className="shrink-0" />Console admin</button>}
+      <button type="button" disabled={isSigningOut} onClick={onExplore} className={`${buttonClass} border-[#141414]/10 bg-white hover:bg-neutral-50`}><Compass aria-hidden="true" size={22} className="shrink-0" />Explorer les fichiers</button>
       <button type="button" disabled={isSigningOut} onClick={() => void handleSignOut()} className={`${buttonClass} border-rose-200 bg-rose-50 text-rose-800 hover:bg-rose-100`}><LogOut aria-hidden="true" size={22} className="shrink-0" />{isSigningOut ? 'Déconnexion en cours…' : 'Se déconnecter'}</button>
       {isSigningOut && <p role="status" className="text-sm">La feuille se fermera après confirmation de la déconnexion.</p>}
       {error && <p role="alert" className="break-words text-sm text-red-800">{error}</p>}

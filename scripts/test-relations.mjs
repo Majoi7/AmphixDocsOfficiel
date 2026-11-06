@@ -12,23 +12,17 @@ const origin = 'https://relations-test.invalid';
 const publicKey = 'sb_publishable_local_tests_only_00000000000000000000';
 const sessionKey = 'amphixdocs-auth-relations-test.invalid';
 const userId = '11111111-1111-4111-8111-111111111111';
-const folderId = '22222222-2222-4222-8222-222222222222';
 const documentId = '33333333-3333-4333-8333-333333333333';
 const uploadId = '55555555-5555-4555-8555-555555555555';
-const newFolderId = '66666666-6666-4666-8666-666666666666';
 const author = { full_name: 'Compte de test', avatar_url: '', email: 'test@example.invalid' };
-const folder = {
-  id: folderId, user_id: userId, name: 'Dossier de test', category_id: null,
-  status: 'pending', rejection_reason: null, created_at: '2026-01-01T00:00:00Z',
-};
 const document = {
   id: documentId, user_id: userId, title: 'Document de test', description: null,
   file_name: 'test.pdf', file_path: `${userId}/test.pdf`, file_type: 'pdf', file_size: 4,
-  folder_id: folderId, category_id: null, status: 'pending', rejection_reason: null,
+  school_name: 'École de test', subject_name: 'Mathématiques', deleted_at: null, deleted_by: null,
+  status: 'pending', rejection_reason: null,
   reviewed_by: null, reviewed_at: null, created_at: '2026-01-01T00:00:00Z',
 };
-const expectedFolderSelect = '*,profiles:profiles!folders_user_id_profiles_fkey(full_name,avatar_url,email)';
-const expectedDocumentSelect = '*,profiles:profiles!documents_user_id_profiles_fkey(full_name,avatar_url,email)';
+const expectedDocumentSelect = 'id,user_id,title,description,file_name,file_path,file_type,file_size,created_at,school_name,subject_name,status,rejection_reason,reviewed_by,reviewed_at,deleted_at,deleted_by,profiles:profiles!documents_user_id_profiles_fkey(full_name,avatar_url,email)';
 const user = {
   id: userId, aud: 'authenticated', role: 'authenticated', email: author.email,
   app_metadata: {}, user_metadata: {}, identities: [], created_at: '2026-01-01T00:00:00Z',
@@ -97,7 +91,7 @@ const jsonResponse = (data, status = 200) => new Response(JSON.stringify(data), 
 });
 const testFile = (contents = 'test') => new File([contents], 'test.pdf', { type: 'application/pdf' });
 const prepareRequest = () => library.prepareUploadDocument(
-  testFile(), 'Nouveau document', '', userId, folderId, null, uploadId
+  testFile(), 'Nouveau document', '', userId, 'École de test', 'Mathématiques', uploadId
 );
 const profiles = (row) => ({ ...row, profiles: profileVisible ? author : null });
 const assertNoCleanup = () => assert.equal(
@@ -114,7 +108,6 @@ function resetFixtures() {
   profileVisible = true;
   verifiedUser = user;
   tables = {
-    folders: new Map([[folderId, { ...folder }]]),
     documents: new Map([[documentId, { ...document }]]),
   };
   objects = new Map([[document.file_path, testFile()]]);
@@ -127,9 +120,9 @@ function respondToLookup(table, url) {
   const lookupFailure = failures[`${table}Lookup`];
   if (lookupFailure) return jsonResponse(lookupFailure.data, lookupFailure.status);
   const rows = [...tables[table].values()].filter((row) =>
-    ['id', 'user_id', 'folder_id', 'status'].every((column) => {
+    ['id', 'user_id', 'status', 'deleted_at'].every((column) => {
       const filter = url.searchParams.get(column);
-      return !filter || filter === `eq.${row[column]}`;
+      return !filter || filter === `eq.${row[column]}` || (filter === 'is.null' && row[column] === null);
     })
   );
   // maybeSingle() transforme zéro/une ligne GET ; une insertion single()
@@ -139,7 +132,7 @@ function respondToLookup(table, url) {
 
 function respondToInsert(table, body) {
   assert.ok(Array.isArray(body) && body.length === 1, 'Une seule identité doit être insérée.');
-  const row = { ...(table === 'documents' ? document : folder), ...body[0] };
+  const row = { ...document, ...body[0] };
   if (tables[table].has(row.id)) {
     return jsonResponse({ code: '23505', message: 'Cette identité existe déjà.' }, 409);
   }
@@ -165,11 +158,7 @@ async function simulatedFetch(input, init = {}) {
   if (url.pathname === '/auth/v1/user' && method === 'GET') {
     return jsonResponse(verifiedUser);
   }
-  if (url.pathname === '/rest/v1/categories' && method === 'GET') {
-    return jsonResponse([{ id: '44444444-4444-4444-8444-444444444444', name: 'Test', color: '#4a6cf0' }]);
-  }
-  const table = ['/rest/v1/folders', '/rest/v1/documents'].includes(url.pathname)
-    ? url.pathname.split('/').at(-1) : null;
+  const table = url.pathname === '/rest/v1/documents' ? 'documents' : null;
   if (table) {
     if (method === 'GET') return respondToLookup(table, url);
     if (method === 'POST') return respondToInsert(table, body);
@@ -274,42 +263,24 @@ after(async () => {
   }
 });
 
-test('la bibliothèque joint explicitement profiles via les deux FK', async () => {
+test('la bibliothèque joint explicitement profiles via la FK documents', async () => {
   const result = await library.fetchDashboardData(userId, false);
-  const folderRequest = requests.find(({ url }) => url.pathname === '/rest/v1/folders');
   const documentRequest = requests.find(({ url }) => url.pathname === '/rest/v1/documents');
-  assert.equal(folderRequest.url.searchParams.get('select'), expectedFolderSelect);
   assert.equal(documentRequest.url.searchParams.get('select'), expectedDocumentSelect);
-  assert.equal(result.folders[0].document_count, 1);
-  assert.equal(result.folders[0].author_name, author.full_name);
   assert.equal(result.documents[0].author_name, author.full_name);
 });
 
-test('un profil masqué par RLS ne fait pas disparaître le document ou le dossier', async () => {
+test('un profil masqué par RLS ne fait pas disparaître le document', async () => {
   profileVisible = false;
   const result = await library.fetchDashboardData(userId, false);
   assert.equal(result.documents[0].id, documentId);
   assert.equal(result.documents[0].author_name, 'Utilisateur');
   assert.equal(result.documents[0].author_email, '');
-  assert.equal(result.folders[0].id, folderId);
-  assert.equal(result.folders[0].author_name, 'Utilisateur');
-});
-
-test('la création de dossier utilise la relation profiles et confirme le retour', async () => {
-  const result = await library.createFolderItem('Nouveau dossier', null, userId, undefined, undefined, newFolderId);
-  const request = requestsFor('POST', '/rest/v1/folders')[0];
-  assert.equal(request.url.searchParams.get('select'), expectedFolderSelect);
-  assert.equal(request.body[0].id, newFolderId);
-  assert.equal(result.id, newFolderId);
-  assert.equal(result.name, 'Nouveau dossier');
-  assert.equal(result.document_count, 0);
-  assert.equal(result.author_name, author.full_name);
-  assert.ok(requestsFor('GET', '/auth/v1/user').length > 0, 'Le compte doit être vérifié avant l’écriture.');
 });
 
 test('le retour du dépôt joint profiles via la FK documents et publie des étapes honnêtes', async () => {
   const stages = [];
-  const result = await library.uploadUserDocument(testFile(), 'Nouveau document', '', userId, folderId, null, (stage) => stages.push(stage));
+  const result = await library.uploadUserDocument(testFile(), 'Nouveau document', '', userId, 'École de test', 'Mathématiques', (stage) => stages.push(stage));
   const request = requestsFor('POST', '/rest/v1/documents')[0];
   assert.equal(request.url.searchParams.get('select'), expectedDocumentSelect);
   assert.equal(result.title, 'Nouveau document');
@@ -320,26 +291,26 @@ test('le retour du dépôt joint profiles via la FK documents et publie des éta
 });
 
 test('la modération laisse reviewer/date au serveur et confirme la cible', async () => {
-  mutationResponses = { '/rest/v1/documents': { data: [{ id: documentId }] } };
-  await library.setItemApprovalStatus('document', documentId, 'approved', undefined, userId);
+  mutationResponses = { '/rest/v1/documents': { data: [{ id: documentId, status: 'approved', rejection_reason: null }] } };
+  await library.setItemApprovalStatus(documentId, 'approved', undefined, userId);
   const request = requests.find(({ method }) => method === 'PATCH');
   assert.deepEqual(request.body, { status: 'approved', rejection_reason: null });
   assert.equal(request.url.searchParams.get('id'), `eq.${documentId}`);
-  assert.equal(request.url.searchParams.get('select'), 'id');
+  assert.equal(request.url.searchParams.get('select'), 'id,status,rejection_reason');
 });
 
 test('une modération refusée ou sans ligne affectée ne donne pas un succès', async () => {
   mutationResponses = { '/rest/v1/documents': { data: [], status: 200 } };
-  await assert.rejects(library.setItemApprovalStatus('document', documentId, 'approved'), /aucun élément confirmé/);
+  await assert.rejects(library.setItemApprovalStatus(documentId, 'approved', undefined, userId), /aucune cible exacte confirmée/);
   mutationResponses = {
     '/rest/v1/documents': { data: { message: 'Accès refusé', code: '42501' }, status: 403 },
   };
-  await assert.rejects(library.setItemApprovalStatus('document', documentId, 'approved'), /Accès refusé/);
+  await assert.rejects(library.setItemApprovalStatus(documentId, 'approved', undefined, userId), /Accès refusé/);
 });
 
 test('l’approbation collective ne touche que les fichiers confirmés par le filtre', async () => {
-  mutationResponses = { '/rest/v1/documents': { data: [{ id: documentId }] } };
-  await library.approveAllPendingItems({ documentIds: [documentId, documentId], folderIds: [] }, userId);
+  mutationResponses = { '/rest/v1/documents': { data: [{ id: documentId, status: 'approved', rejection_reason: null }] } };
+  await library.approveAllPendingItems({ documentIds: [documentId, documentId] }, userId);
   const patches = requests.filter(({ method }) => method === 'PATCH');
   assert.equal(patches.length, 1);
   assert.equal(patches[0].url.pathname, '/rest/v1/documents');
@@ -348,42 +319,31 @@ test('l’approbation collective ne touche que les fichiers confirmés par le fi
   assert.deepEqual(patches[0].body, { status: 'approved', rejection_reason: null });
 });
 
-test('le filtre dossiers n’approuve aucun fichier et une sélection vide ne mute rien', async () => {
-  mutationResponses = { '/rest/v1/folders': { data: [{ id: folderId }] } };
-  await library.approveAllPendingItems({ documentIds: [], folderIds: [folderId] });
-  const patches = requests.filter(({ method }) => method === 'PATCH');
-  assert.equal(patches.length, 1);
-  assert.equal(patches[0].url.pathname, '/rest/v1/folders');
-  assert.equal(patches[0].url.searchParams.get('id'), `in.(${folderId})`);
-  requests = [];
-  await library.approveAllPendingItems({ documentIds: [], folderIds: [] });
+test('une sélection vide est refusée sans mutation', async () => {
+  await assert.rejects(library.approveAllPendingItems({ documentIds: [] }, userId), /Aucun fichier en attente/);
   assert.equal(requests.length, 0);
 });
 
-test('un succès partiel de deux tables est annoncé comme incomplet', async () => {
+test('un succès partiel des fichiers est annoncé comme incomplet', async () => {
   mutationResponses = {
-    '/rest/v1/documents': { data: [{ id: documentId }] },
-    '/rest/v1/folders': { data: { message: 'Refus RLS', code: '42501' }, status: 403 },
+    '/rest/v1/documents': { data: [{ id: documentId, status: 'approved', rejection_reason: null }] },
   };
   await assert.rejects(
-    library.approveAllPendingItems({ documentIds: [documentId], folderIds: [folderId] }),
-    /Approbation incomplète : 1 sur 2.*Refus RLS/
+    library.approveAllPendingItems({ documentIds: [documentId, uploadId] }, userId),
+    /Approbation incomplète : 1 sur 2/
   );
 });
 
 test('une cible absente ou une réponse réseau perdue n’est pas confirmée', async () => {
   mutationResponses = { '/rest/v1/documents': { data: [] } };
   await assert.rejects(
-    library.approveAllPendingItems({ documentIds: [documentId], folderIds: [] }),
+    library.approveAllPendingItems({ documentIds: [documentId] }, userId),
     /Approbation incomplète : 0 sur 1/
   );
-  mutationResponses = {
-    '/rest/v1/documents': new Error('Panne de test locale'),
-    '/rest/v1/folders': { data: [{ id: folderId }] },
-  };
+  mutationResponses = { '/rest/v1/documents': new Error('Panne de test locale') };
   await assert.rejects(
-    library.approveAllPendingItems({ documentIds: [documentId], folderIds: [folderId] }),
-    /Approbation incomplète : 1 sur 2/
+    library.approveAllPendingItems({ documentIds: [documentId, uploadId] }, userId),
+    /Panne de test locale/
   );
 });
 
@@ -479,17 +439,8 @@ test('resélectionner un fichier de même nom et taille mais de contenu différe
   assertNoCleanup();
 });
 
-test('une création de dossier à réponse perdue se réconcilie sous son identité stable', async () => {
-  const request = { id: newFolderId, userId, name: 'Dossier repris', categoryId: null };
-  failures.foldersInsert = { committed: true, error: new Error('Réponse dossier perdue localement') };
-  const first = await library.resumeUploadFolder(request, origin);
-  const resumed = await library.resumeUploadFolder(request, origin);
-  assert.equal(first.id, newFolderId);
-  assert.equal(resumed.id, first.id);
-  assert.equal(requestsFor('POST', '/rest/v1/folders').length, 1);
-  assert.equal(tables.folders.size, 2);
-  assertNoCleanup();
-});
+// Création/reprise de dossier retirées avec le contrat V5, sans contourner
+// les tests de reprise des fichiers ni l'interdiction de réseau réel.
 
 test('un compte Auth incompatible bloque les écritures et conserve l’identité du dépôt', async () => {
   const request = await prepareRequest();

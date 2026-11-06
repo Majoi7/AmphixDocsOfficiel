@@ -10,7 +10,6 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const userId = '11111111-1111-4111-8111-111111111111';
 const otherUserId = '99999999-9999-4999-8999-999999999999';
 const projectUrl = 'https://upload-batch-test.invalid';
-const folderId = '22222222-2222-4222-8222-222222222222';
 const batchId = '77777777-7777-4777-8777-777777777777';
 const secondBatchId = '88888888-8888-4888-8888-888888888888';
 let server;
@@ -39,7 +38,7 @@ function prepared(index = 1, overrides = {}, contents = 'test') {
   const request = {
     identity: { id, filePath: `${userId}/${id}-${fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}` },
     userId, title: `Cours ${index}`, description: '', fileName, fileSize: file.size, fileType: 'pdf',
-    sha256: createHash('sha256').update(contents).digest('hex'), folderId: null, categoryId: null,
+    sha256: createHash('sha256').update(contents).digest('hex'), schoolName: 'École de test', subjectName: 'Mathématiques',
     ...overrides,
   };
   return { request, file };
@@ -48,25 +47,17 @@ function documentFrom(request) {
   return {
     id: request.identity.id, user_id: request.userId, title: request.title,
     description: request.description || null, file_name: request.fileName, file_path: request.identity.filePath,
-    file_size: request.fileSize, file_type: request.fileType, folder_id: request.folderId,
-    category_id: request.categoryId, status: 'pending', rejection_reason: null,
+    file_size: request.fileSize, file_type: request.fileType, school_name: request.schoolName,
+    subject_name: request.subjectName, deleted_at: null, deleted_by: null, status: 'pending', rejection_reason: null,
     reviewed_by: null, reviewed_at: null, created_at: '2026-01-01T00:00:00Z',
   };
 }
-const folderRequest = { id: folderId, userId, name: 'Dossier du lot', categoryId: null };
-function folderFrom(request) {
-  return {
-    id: request.id, user_id: request.userId, name: request.name, category_id: request.categoryId,
-    status: 'pending', rejection_reason: null, document_count: 0, created_at: '2026-01-01T00:00:00Z',
-  };
-}
-function batch(entries = [prepared()], newFolder = null, id = batchId) {
-  return library.createUploadBatch(userId, projectUrl, entries, newFolder, id);
+function batch(entries = [prepared()], id = batchId) {
+  return library.createUploadBatch(userId, projectUrl, entries, id);
 }
 function dependencies(overrides = {}) {
   return {
     generation: 4, isCurrent: () => true,
-    uploadFolder: async (request) => folderFrom(request),
     uploadDocument: async (request, _file, stage) => {
       stage('transfert'); stage('enregistrement'); stage('termine');
       return documentFrom(request);
@@ -99,28 +90,23 @@ async function complete(value) {
   assert.equal(library.isUploadBatchComplete(result), false);
 });
 
-test('trois réussites et le dossier remontent cumulativement, sous les mêmes identifiants', async () => {
-  const entries = [1, 2, 3].map((index) => prepared(index, { folderId }));
-  const value = batch(entries, folderRequest);
+test('trois réussites remontent cumulativement, sous les mêmes identifiants', async () => {
+  const entries = [1, 2, 3].map((index) => prepared(index));
+  const value = batch(entries);
   const calls = [];
   const reports = [];
   const changes = [];
   const result = await library.runUploadBatch(value, dependencies({
-    uploadFolder: async (request, project) => {
-      calls.push(['folder', request.id, project]); return folderFrom(request);
-    },
     uploadDocument: async (request, file, stage, project, mode) => {
       calls.push(['document', request.identity.id, project, mode]);
       assert.equal(file, entries.find((entry) => entry.request.identity.id === request.identity.id).file);
       stage('transfert'); stage('enregistrement'); return documentFrom(request);
     },
   }), (next) => changes.push(next), (report) => reports.push(report));
-  assert.equal(calls[0][0], 'folder');
-  assert.deepEqual(calls.slice(1).map((call) => call.slice(1)),
+  assert.deepEqual(calls.map((call) => call.slice(1)),
     entries.map(({ request }) => [request.identity.id, projectUrl, 'initial']));
-  assert.deepEqual(reports.map((report) => report.documents.length), [0, 1, 2, 3, 3]);
+  assert.deepEqual(reports.map((report) => report.documents.length), [1, 2, 3, 3]);
   assert.ok(reports.every((report) => report.userId === userId && report.projectUrl === projectUrl && report.generation === 4));
-  assert.equal(reports.at(-1).folder.id, folderId);
   assert.equal(reports.at(-1).complete, true);
   assert.ok(changes.some((next) => next.entries.some((entry) => entry.stage === 'transfert')));
   assert.ok(result.entries.every((entry) => entry.status === 'confirmed' && entry.document.status === 'pending'));
@@ -166,32 +152,8 @@ test('une exception non typée reste indéterminée, pas un succès', async () =
   assert.equal(library.isUploadBatchComplete(result), false);
 });
 
-test('un échec de dossier conserve la requête et empêche les transferts avant sa reprise', async () => {
-  const value = batch([prepared(1, { folderId })], folderRequest);
-  let documentCalls = 0;
-  const first = await library.runUploadBatch(value, dependencies({
-    uploadFolder: async () => { throw failure('uncertain'); },
-    uploadDocument: async (request) => { documentCalls++; return documentFrom(request); },
-  }), noChange, noChange);
-  assert.equal(documentCalls, 0);
-  assert.equal(first.folderFailureKind, 'uncertain');
-  assert.equal(first.entries[0].attempted, false);
-  assert.deepEqual(first.folderRequest, folderRequest);
-  const result = await complete(first);
-  assert.equal(result.folder.id, folderId);
-  assert.equal(library.isUploadBatchComplete(result), true);
-});
-
-test('un conflit de dossier n’est pas relancé automatiquement', async () => {
-  const value = batch([prepared(1, { folderId })], folderRequest);
-  let writes = 0;
-  const deps = dependencies({ uploadFolder: async () => { writes++; throw failure('conflict'); } });
-  const first = await library.runUploadBatch(value, deps, noChange, noChange);
-  const second = await library.runUploadBatch(first, deps, noChange, noChange);
-  assert.equal(writes, 1);
-  assert.equal(library.canRetryUploadBatch(second), false);
-  assert.equal(second.entries[0].status, 'pending');
-});
+// Les scénarios de création/conflit de dossier ont été retirés :
+// le contrat V5 ne crée plus de dossiers.
 
 test('un conflit de fichier conserve les réussites suivantes, sans retenter le conflit', async () => {
   const entries = [prepared(1), prepared(2)];
@@ -275,11 +237,11 @@ test('une exception de publication locale n’annule pas les confirmations dista
 
 test('une trace restaurée revérifie toutes les identités sans supposer un succès ni un fichier local', async () => {
   const store = memoryStorage();
-  const completed = await complete(batch([prepared(1, { folderId }), prepared(2, { folderId })], folderRequest));
+  const completed = await complete(batch([prepared(1), prepared(2)]));
   library.saveUploadJournal(store, completed);
   const restored = library.readUploadJournal(store, userId, projectUrl);
   assert.ok(restored.entries.every((entry) => entry.status === 'pending' && entry.attempted && !entry.file && !entry.document));
-  assert.equal(restored.folder, null);
+  assert.equal(restored.legacySource, null);
   const calls = [];
   const result = await library.runUploadBatch(restored, dependencies({
     uploadDocument: async (request, file, _stage, project, mode) => {
@@ -331,7 +293,7 @@ test('le journal ne conserve que les requêtes, sans fichiers, profils, clés ou
   const raw = [...store.values.values()][0];
   assert.doesNotMatch(raw, /secret-fictif|profil-fictif|erreur-fictive|access_token|private_key|"file"|"status"|"document"/);
   const saved = JSON.parse(raw);
-  assert.deepEqual(Object.keys(saved).sort(), ['version', 'id', 'userId', 'projectUrl', 'folderRequest', 'requests'].sort());
+  assert.deepEqual(Object.keys(saved).sort(), ['version', 'id', 'userId', 'projectUrl', 'legacySource', 'requests'].sort());
   assert.deepEqual(saved.requests[0].identity, value.entries[0].request.identity);
 });
 
@@ -346,14 +308,14 @@ test('l’absence et le périmètre compte/projet des traces restent distincts',
 
 test('une trace illisible ou une identité altérée reste conservée et bloque la reprise', () => {
   const store = memoryStorage();
-  library.saveUploadJournal(store, batch([prepared(1, { folderId })], folderRequest));
+  library.saveUploadJournal(store, batch());
   const [key, raw] = [...store.values][0];
   for (const changed of [
     '{invalide',
     JSON.stringify({ ...JSON.parse(raw), userId: otherUserId }),
     JSON.stringify({ ...JSON.parse(raw), projectUrl: 'https://autre-projet.invalid' }),
     JSON.stringify({ ...JSON.parse(raw), requests: [JSON.parse(raw).requests[0], JSON.parse(raw).requests[0]] }),
-    JSON.stringify({ ...JSON.parse(raw), folderRequest: { ...folderRequest, userId: otherUserId } }),
+    JSON.stringify({ ...JSON.parse(raw), legacySource: { userId: otherUserId } }),
     JSON.stringify({ ...JSON.parse(raw), requests: [{ ...JSON.parse(raw).requests[0], identity: { id: prepared().request.identity.id, filePath: 'chemin/altéré' } }] }),
   ]) {
     store.values.set(key, changed);
@@ -402,7 +364,7 @@ test('un autre lot détecté dans le journal n’est jamais écrasé par un nouv
   const first = batch();
   library.saveUploadJournal(store, first);
   const raw = [...store.values.values()][0];
-  assert.throws(() => library.saveUploadJournal(store, batch([prepared(2)], null, secondBatchId)), /autre trace/);
+  assert.throws(() => library.saveUploadJournal(store, batch([prepared(2)], secondBatchId)), /autre trace/);
   assert.equal([...store.values.values()][0], raw);
 });
 
@@ -431,7 +393,7 @@ test('seul le lot complet correspondant à la trace peut la retirer', async () =
 test('terminer un lot ne retire pas la trace d’un autre lot', async () => {
   const store = memoryStorage();
   const first = await complete(batch());
-  library.saveUploadJournal(store, batch([prepared(2)], null, secondBatchId));
+  library.saveUploadJournal(store, batch([prepared(2)], secondBatchId));
   const raw = [...store.values.values()][0];
   assert.throws(() => library.clearCompletedUploadJournal(store, first), /autre trace/);
   assert.equal([...store.values.values()][0], raw);

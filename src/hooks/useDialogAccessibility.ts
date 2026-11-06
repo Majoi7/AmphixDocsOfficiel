@@ -2,7 +2,7 @@ import { useEffect, useRef, type RefObject } from 'react';
 
 const dialogs: HTMLElement[] = [];
 let savedOverflow = '';
-const focusableSelector = 'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+const focusableSelector = 'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex]:not([tabindex="-1"])';
 
 export function useDialogAccessibility(
   ref: RefObject<HTMLElement | null>, open: boolean, onClose: () => void, canClose = true
@@ -27,8 +27,11 @@ export function useDialogAccessibility(
         && !element.closest('[aria-hidden="true"], [inert]') && element.getClientRects().length > 0);
     const focusFirst = () => {
       const items = focusable();
-      // La cible préférée doit être utilisable, y compris sous un fieldset disabled.
-      (items.find((element) => element.hasAttribute('data-autofocus')) || items[0] || dialog).focus();
+      const preferred = dialog.querySelector<HTMLElement>('[data-autofocus]');
+      // Les titres tabindex=-1 sont des cibles initiales valides, sans ajouter
+      // d’arrêt dans la boucle Tab. Un champ désactivé ne l’est pas.
+      (preferred && !preferred.matches(':disabled') && preferred.getClientRects().length > 0
+        ? preferred : items[0] || dialog).focus({ preventScroll: true });
     };
     focusFirst();
 
@@ -43,8 +46,9 @@ export function useDialogAccessibility(
       const first = items[0];
       const last = items[items.length - 1];
       if (!first) { event.preventDefault(); dialog.focus(); return; }
-      if (!dialog.contains(document.activeElement) || (event.shiftKey && document.activeElement === first)
-        || (!event.shiftKey && document.activeElement === last) || document.activeElement === dialog) {
+      if (!items.some((element) => element === document.activeElement)
+        || (event.shiftKey && document.activeElement === first)
+        || (!event.shiftKey && document.activeElement === last)) {
         event.preventDefault();
         (event.shiftKey ? last : first).focus();
       }
@@ -60,7 +64,7 @@ export function useDialogAccessibility(
       const index = dialogs.indexOf(dialog);
       if (index >= 0) dialogs.splice(index, 1);
       if (dialogs.length === 0) document.body.style.overflow = savedOverflow;
-      if (previousFocus?.isConnected) previousFocus.focus();
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
     };
   }, [open, ref]);
 }

@@ -4,7 +4,7 @@
  */
 
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { createBrowserRouter, RouterProvider, Outlet, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { PageTransitionOverlay } from './components/PageTransitionOverlay';
@@ -28,7 +28,7 @@ function AppContent() {
   }
 
   return (
-    <BrowserRouter>
+    <>
       <PageTransitionOverlay />
       <SupabaseConfigModal
         isOpen={isConfigModalOpen}
@@ -36,34 +36,27 @@ function AppContent() {
       />
       <UpdateToast />
       <InstallPrompt />
-      <Routes>
-        <Route path="/" element={<LandingPage />} />
-        <Route
-          path="/dashboard"
-          element={
-            <ProtectedRoute>
-              <DashboardPage />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/admin"
-          element={
-            <AdminRoute>
-              <AdminPage />
-            </AdminRoute>
-          }
-        />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </BrowserRouter>
+      <Outlet />
+    </>
   );
 }
+
+// Le routeur de données permet de bloquer aussi le retour navigateur pendant
+// une écriture, sans bricoler l’historique ni perdre le composant de dépôt.
+const router = createBrowserRouter([{
+  element: <AppContent />,
+  children: [
+    { path: '/', element: <LandingPage /> },
+    { path: '/dashboard', element: <ProtectedRoute><DashboardPage /></ProtectedRoute> },
+    { path: '/admin', element: <AdminRoute><AdminPage /></AdminRoute> },
+    { path: '*', element: <Navigate to="/" replace /> },
+  ],
+}]);
 
 export default function App() {
   return (
     <AuthProvider>
-      <AppContent />
+      <RouterProvider router={router} />
     </AuthProvider>
   );
 }

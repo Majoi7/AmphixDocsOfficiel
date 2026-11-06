@@ -21,6 +21,7 @@ import { useAuth } from '../context/AuthContext';
 import { useDialogAccessibility } from '../hooks/useDialogAccessibility';
 import { useDialogViewport } from '../hooks/useDialogViewport';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { usePendingNavigation } from '../hooks/usePendingNavigation';
 
 interface UploadModalProps {
   isOpen: boolean;
@@ -87,6 +88,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
   const suggestions = uploadSuggestions(scopeMatches ? documents : [], schoolName, scopeMatches ? preference : null);
   useDialogAccessibility(modalRef, isOpen, onClose, !isBusy);
   useDialogViewport(viewportRef, isOpen);
+  usePendingNavigation(isOpen && isBusy);
 
   // Une trace incomplète prime sur un nouveau dépôt, même après changement de
   // compte. Aucun changement de props ne réinitialise un formulaire en cours.
