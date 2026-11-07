@@ -54,16 +54,11 @@ export default defineConfig(() => {
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           navigateFallback: '/index.html',
+          // Aucune route Workbox ne correspond à Supabase, même NetworkOnly :
+          // Auth, REST, Storage, liens signés et TUS passent directement au réseau.
+          navigateFallbackDenylist: [/^\/(?:auth|rest|storage|realtime)\/v1(?:\/|$)/],
           runtimeCaching: [
-            // RÈGLE STRICTE : Jamais de cache pour les requêtes Supabase (Auth, Postgres DB, Storage signés)
-            {
-              urlPattern: /^https:\/\/.*\.supabase\.co\/.*/i,
-              handler: 'NetworkOnly',
-              options: {
-                cacheName: 'supabase-no-cache',
-              },
-            },
-            // Cache pour les polices Google Fonts
+            // Seuls les domaines de polices ci-dessous ont une route distante.
             {
               urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
               handler: 'CacheFirst',

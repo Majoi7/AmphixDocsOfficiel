@@ -13,7 +13,7 @@ interface MobileNavProps {
 
 export function MobileNav({ isModalOpen = false }: MobileNavProps) {
   const location = useLocation();
-  const { view, panel, selectView, openPanel, closePanel } = useLibraryNavigation();
+  const { view, panel, documentId, selectView, openPanel, closePanel } = useLibraryNavigation();
   const { user } = useAuth();
   const reducedMotion = useReducedMotion();
   const { isScrollingDown, isKeyboardOpen } = useScrollDirection();
@@ -21,7 +21,7 @@ export function MobileNav({ isModalOpen = false }: MobileNavProps) {
   const eligible = location.pathname === '/dashboard' || location.pathname === '/admin';
   if (!eligible) return null;
 
-  const shouldHide = isScrollingDown || isKeyboardOpen || isModalOpen || !!panel;
+  const shouldHide = isScrollingDown || isKeyboardOpen || isModalOpen || !!panel || !!documentId;
   const selected = location.pathname === '/dashboard' ? view : undefined;
   const avatar = user?.user_metadata?.avatar_url || user?.user_metadata?.picture;
 

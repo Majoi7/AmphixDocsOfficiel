@@ -7,13 +7,14 @@ interface PreparedLink {
   url: string;
   expiresAt: number;
   filePath: string;
+  downloadName?: string;
   userId: string;
   generation: number;
 }
 
 // Le lien reste en mémoire et n'est ouvert que par un vrai clic sur un lien.
 // Il est invalidé au changement de compte/projet et avant son expiration.
-export function useDocumentLink(filePath: string) {
+export function useDocumentLink(filePath: string, downloadName?: string) {
   const { user } = useAuth();
   const { generation } = useSyncExternalStore(subscribeSupabaseClient, getSupabaseClientState, getSupabaseClientState);
   const [prepared, setPrepared] = useState<PreparedLink | null>(null);
@@ -21,8 +22,8 @@ export function useDocumentLink(filePath: string) {
   const [linkError, setLinkError] = useState<string | null>(null);
   const revision = useRef(0);
   const pendingRequest = useRef<number | null>(null);
-  const current = useRef({ filePath, userId: user?.id, generation });
-  current.current = { filePath, userId: user?.id, generation };
+  const current = useRef({ filePath, downloadName, userId: user?.id, generation });
+  current.current = { filePath, downloadName, userId: user?.id, generation };
 
   useEffect(() => {
     revision.current += 1;
@@ -31,7 +32,7 @@ export function useDocumentLink(filePath: string) {
     setLinkError(null);
     setIsPreparing(false);
     return () => { revision.current += 1; };
-  }, [filePath, user?.id, generation]);
+  }, [filePath, downloadName, user?.id, generation]);
 
   useEffect(() => {
     if (!prepared) return;
@@ -51,6 +52,7 @@ export function useDocumentLink(filePath: string) {
     const startedAt = Date.now();
     const isCurrent = () => request === revision.current
       && current.current.filePath === captured.filePath
+      && current.current.downloadName === captured.downloadName
       && current.current.userId === captured.userId
       && current.current.generation === captured.generation
       && getSupabaseClientState().generation === captured.generation;
@@ -58,13 +60,13 @@ export function useDocumentLink(filePath: string) {
     setLinkError(null);
     setPrepared(null);
     try {
-      const url = await getDocumentSignedUrl(captured.filePath);
+      const url = await getDocumentSignedUrl(captured.filePath, captured.downloadName);
       if (!isCurrent()) return;
       // L'API signe pour 60 s : on retire le lien 5 s plus tôt, en tenant
       // aussi compte du temps passé à attendre la réponse.
       const expiresAt = startedAt + 55_000;
       if (expiresAt <= Date.now()) throw new Error('La préparation du lien a pris trop de temps. Réessayez.');
-      setPrepared({ url, expiresAt, filePath: captured.filePath, userId: captured.userId, generation: captured.generation });
+      setPrepared({ url, expiresAt, filePath: captured.filePath, downloadName: captured.downloadName, userId: captured.userId, generation: captured.generation });
     } catch (error) {
       if (isCurrent()) setLinkError(errorMessage(error, 'Impossible de préparer l’ouverture. Réessayez.'));
     } finally {
@@ -74,6 +76,7 @@ export function useDocumentLink(filePath: string) {
   };
 
   const url = prepared && prepared.userId === user?.id && prepared.generation === generation
-    && prepared.filePath === filePath && prepared.expiresAt > Date.now() ? prepared.url : null;
+    && prepared.filePath === filePath && prepared.downloadName === downloadName
+    && prepared.expiresAt > Date.now() ? prepared.url : null;
   return { url, isPreparing, linkError, prepareLink };
 }

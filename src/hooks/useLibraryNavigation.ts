@@ -1,43 +1,52 @@
 import { useLocation, useNavigate } from 'react-router-dom';
 import { dashboardUrl, readLibraryLocation, type DashboardView, type LibraryPanel } from '../lib/library-navigation';
 
-// L’URL est l’unique état de navigation : rechargement, liens directs et retour
-// navigateur restituent la même vue. La saisie remplace l’entrée courante.
+// L’URL est l’état de navigation ; une fermeture de lien direct ne quitte pas
+// l’application. Les panneaux ouverts depuis une carte utilisent l’historique.
 export function useLibraryNavigation() {
   const location = useLocation();
   const navigate = useNavigate();
   const current = readLibraryLocation(location.search);
   const href = `${location.pathname}${location.search}`;
-  const selectView = (view: DashboardView) => {
-    const target = dashboardUrl(view, { query: view === current.view ? current.query : undefined });
-    if (target !== href) void navigate(target, { replace: !!current.panel });
-  };
-  const openPanel = (panel: LibraryPanel) => {
-    if (current.panel === panel) return;
-    const params = new URLSearchParams(location.search);
-    params.set('panel', panel);
-    const target = panel === 'upload' && location.pathname !== '/dashboard'
-      ? dashboardUrl('home', { panel }) : `${location.pathname}?${params}`;
-    void navigate(target, {
-      replace: !!current.panel,
-      state: current.panel ? location.state : { libraryPanelOrigin: href },
-    });
-  };
-  const closePanel = () => {
+  const hasOverlay = !!(current.panel || current.documentId);
+  const overlayState = hasOverlay ? location.state : { libraryPanelOrigin: href };
+  const closeOverlay = () => {
     const state: unknown = location.state;
     if (typeof state === 'object' && state !== null && 'libraryPanelOrigin' in state
       && typeof state.libraryPanelOrigin === 'string') {
       void navigate(-1);
       return;
     }
-    // Un lien direct n’a pas forcément d’entrée précédente dans l’application.
     const params = new URLSearchParams(location.search);
     params.delete('panel');
+    params.delete('document');
     const search = params.toString();
     void navigate(`${location.pathname}${search ? `?${search}` : ''}`, { replace: true, state: null });
   };
   return {
-    ...current, selectView, openPanel, closePanel,
+    ...current,
+    selectView: (view: DashboardView) => {
+      const target = dashboardUrl(view, { query: view === current.view ? current.query : undefined });
+      if (target !== href) void navigate(target, { replace: hasOverlay });
+    },
+    openPanel: (panel: LibraryPanel) => {
+      if (current.panel === panel) return;
+      const params = new URLSearchParams(location.search);
+      params.set('panel', panel);
+      params.delete('document');
+      const target = panel === 'upload' && location.pathname !== '/dashboard'
+        ? dashboardUrl('home', { panel }) : `${location.pathname}?${params}`;
+      void navigate(target, { replace: hasOverlay, state: overlayState });
+    },
+    openDocument: (id: string) => {
+      if (current.documentId === id) return;
+      const params = new URLSearchParams(location.search);
+      params.set('document', id);
+      params.delete('panel');
+      void navigate(`${location.pathname}?${params}`, { replace: hasOverlay, state: overlayState });
+    },
+    closePanel: closeOverlay,
+    closeDocument: closeOverlay,
     setQuery: (query: string) => void navigate(dashboardUrl(current.view === 'home' ? 'search' : current.view,
       { query, showTrash: current.showTrash }), { replace: true }),
     setShowTrash: (showTrash: boolean) => {

@@ -6,7 +6,7 @@ import {
   fetchUserRole, getSupabaseClientState, subscribeSupabaseClient,
 } from '../lib/supabase';
 import { createAuthSessionController, emptyAuthSnapshot, type AuthSnapshot } from '../lib/auth-session';
-import { errorMessage } from '../lib/errors';
+import { errorMessage, logDevelopmentError, userError } from '../lib/errors';
 
 interface AuthContextType extends AuthSnapshot {
   isAdmin: boolean;
@@ -72,9 +72,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const error = search.get('error') || hash.get('error');
     if (!code && !description && !error) return;
 
+    logDevelopmentError(new Error(description || code || error || 'Retour de connexion invalide'), 'Connexion Google');
     const message = code === 'signup_disabled'
-      ? 'signup_disabled : les inscriptions sont refusées par ce projet. Faites vérifier ce réglage par une personne administratrice avant de réessayer.'
-      : errorMessage(new Error(description || code || error || 'La connexion a été refusée.')).slice(0, 600);
+      ? 'Les inscriptions sont momentanément fermées. Contactez une personne administratrice.'
+      : 'La connexion a été refusée. Réessayez.';
     setLastAuthError(message);
     setIsConfigModalOpen(true);
     for (const name of ['error', 'error_code', 'error_description']) search.delete(name);
@@ -141,7 +142,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!data.url) throw new Error('Le service n’a pas retourné de lien de connexion. Réessayez.');
       window.location.assign(data.url);
     } catch (error) {
-      const message = errorMessage(error, 'La connexion Google n’a pas pu être démarrée. Réessayez.');
+      const message = userError(error, 'La connexion Google n’a pas pu être démarrée. Réessayez.');
       if (getSupabaseClientState().generation === originState.generation) {
         setLastAuthError(message);
         setIsConfigModalOpen(true);
@@ -165,7 +166,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
       setLastAuthError(null);
     } catch (error) {
-      const message = errorMessage(error, 'La déconnexion a échoué. Réessayez.');
+      const message = userError(error, 'La déconnexion a échoué. Réessayez.');
       if (getSupabaseClientState().generation === originState.generation) setLastAuthError(message);
       throw new Error(message);
     }

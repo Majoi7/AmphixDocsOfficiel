@@ -31,10 +31,10 @@ export const Navbar: React.FC = () => {
 
   return (
     <header className="safe-top sticky top-0 z-40 w-full bg-[#f1ece4]/90 backdrop-blur border-b border-[#141414]/10">
-      <div className="w-full min-w-0 max-w-6xl mx-auto px-4 sm:px-8 min-h-16 flex items-center justify-between gap-2">
+      <div className="w-full min-w-0 max-w-6xl mx-auto px-4 sm:px-8 min-h-13 md:min-h-16 flex items-center justify-between gap-2">
         <Link
           to="/"
-          className="text-xl font-extrabold tracking-[-0.02em] select-none rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#ff6a2b]"
+          className="inline-flex min-h-11 items-center text-xl font-extrabold tracking-[-0.02em] select-none rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#ff6a2b]"
           aria-label="AmphixDocs, retour à l'accueil"
         >
           <span className="text-[#141414]">Amphix</span>
@@ -45,7 +45,7 @@ export const Navbar: React.FC = () => {
           <button
             type="button"
             onClick={goToDashboard}
-            className="inline-flex min-w-0 items-center justify-center min-h-10 px-3 sm:px-5 py-2 rounded-full bg-[#4a6cf0] text-[#f1ece4] text-sm font-semibold hover:bg-[#3d5ed8] hover:-rotate-2 active:scale-95 transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff6a2b]"
+            className="hidden md:inline-flex min-w-0 items-center justify-center min-h-11 px-3 sm:px-5 py-2 rounded-full bg-[#4a6cf0] text-[#f1ece4] text-sm font-semibold hover:bg-[#3d5ed8] hover:-rotate-2 active:scale-95 transition cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff6a2b]"
           >
             <span className="sm:hidden">Bibliothèque</span>
             <span className="hidden sm:inline">Ouvrir le dashboard</span>
@@ -55,7 +55,7 @@ export const Navbar: React.FC = () => {
             type="button"
             disabled={connecting}
             onClick={handleAuth}
-            className="inline-flex items-center gap-2.5 h-10 px-4 rounded-full bg-white text-[#141414] text-sm font-semibold hover:-rotate-2 active:scale-95 transition cursor-pointer disabled:opacity-60 disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff6a2b]"
+            className="hidden md:inline-flex items-center gap-2.5 h-11 px-4 rounded-full bg-white text-[#141414] text-sm font-semibold hover:-rotate-2 active:scale-95 transition cursor-pointer disabled:opacity-60 disabled:cursor-wait focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff6a2b]"
           >
             {connecting ? (
               <>

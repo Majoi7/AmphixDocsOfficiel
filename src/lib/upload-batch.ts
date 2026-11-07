@@ -1,5 +1,5 @@
 import type { DocumentItem, UploadDocumentRequest, UploadFailureKind, UploadStage } from './supabase';
-import { errorMessage } from './errors';
+import { userError } from './errors';
 
 export type BatchEntryStatus = 'pending' | 'working' | 'confirmed' | 'error';
 export interface UploadBatchEntry {
@@ -66,10 +66,10 @@ export interface UploadJournalStorage {
 }
 export const UPLOAD_STAGE_LABELS: Record<UploadBatchEntry['stage'], string> = {
   preparation: 'Préparation du fichier',
-  transfert: 'Transfert du fichier — volume envoyé non mesuré',
-  enregistrement: 'Enregistrement des métadonnées',
-  verification: 'Vérification du fichier et des métadonnées',
-  termine: 'Fichier et métadonnées confirmés',
+  transfert: 'Envoi du fichier',
+  enregistrement: 'Enregistrement du fichier',
+  verification: 'Vérification de l’envoi',
+  termine: 'Fichier envoyé',
 };
 
 export function createUploadBatch(
@@ -125,7 +125,7 @@ export async function runUploadBatch(
 ): Promise<UploadBatch> {
   let current: UploadBatch = { ...batch, notificationError: null };
   const rememberNotificationError = (error: unknown) => {
-    current = { ...current, notificationError: `Le bilan local n’a pas pu être actualisé : ${errorMessage(error)} Les écritures confirmées restent confirmées. Réessayez l’affichage ou rechargez la bibliothèque.` };
+    current = { ...current, notificationError: userError(error, 'La liste n’a pas pu être actualisée. Vos fichiers envoyés sont conservés. Actualisez la bibliothèque.') };
   };
   const publish = () => {
     try { onChange(current); } catch (error) { rememberNotificationError(error); }
@@ -160,7 +160,14 @@ export async function runUploadBatch(
       updateEntry(index, { status: 'confirmed', stage: 'termine', document, error: null, failureKind: null });
     } catch (error) {
       const kind = failureKind(error);
-      updateEntry(index, { status: 'error', document: null, error: errorMessage(error), failureKind: kind });
+      const message = kind === 'scope'
+        ? 'Votre connexion a changé. Reconnectez-vous au compte utilisé pour ce dépôt.'
+        : kind === 'conflict'
+          ? 'Ce fichier ne peut pas être repris. Demandez de l’aide à une personne administratrice.'
+          : !entry.file
+            ? 'Choisissez à nouveau ce fichier pour reprendre l’envoi.'
+            : 'L’envoi n’a pas pu être terminé. Réessayez ; les fichiers déjà envoyés sont conservés.';
+      updateEntry(index, { status: 'error', document: null, error: userError(error, message), failureKind: kind });
       if (kind === 'scope') break;
     }
     report();
@@ -282,6 +289,20 @@ function parseJournal(raw: string, userId: string, projectUrl: string): UploadBa
     // Aucune confirmation distante n'est supposée après un rechargement.
     entries: requests.map((request) => ({ request, attempted: true, status: 'pending', stage: 'verification',
       document: null, error: null, failureKind: null })) };
+}
+// Le brouillon IndexedDB conserve exactement le même contrat de reprise que
+// le journal historique : ni session, ni jeton, ni confirmation supposée.
+export function serializeUploadBatch(batch: UploadBatch): string {
+  const raw = JSON.stringify(journalData(batch));
+  parseJournal(raw, batch.userId, batch.projectUrl);
+  return raw;
+}
+export function restoreUploadBatch(raw: string, userId: string, projectUrl: string): UploadBatch {
+  return parseJournal(raw, userId, projectUrl);
+}
+export function preservesUploadBatch(previousRaw: string, next: UploadBatch): boolean {
+  const expected = serializeUploadBatch(next);
+  return matchesUploadJournal(previousRaw, expected, next) || allowsLegacyCompletion(previousRaw, next);
 }
 export function readUploadJournal(storage: UploadJournalStorage, userId: string, projectUrl: string): UploadBatch | null {
   let raw: string | null;

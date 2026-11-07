@@ -1,6 +1,6 @@
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
 import type { Database, UserRole } from './database.types';
-import { errorMessage } from './errors';
+import { errorMessage, userError } from './errors';
 
 export interface AuthSnapshot {
   generation: number;
@@ -68,7 +68,7 @@ export function createAuthSessionController({ client, generation, loadRole, publ
       update({ ...snapshot, userRole: role, roleStatus: 'ready', roleError: null });
     } catch (error) {
       if (!current()) return;
-      const message = errorMessage(error, 'Votre rôle n’a pas pu être vérifié. Réessayez.');
+      const message = userError(error, 'Votre accès n’a pas pu être vérifié. Réessayez.');
       update({ ...snapshot, userRole: null, roleStatus: 'error', roleError: message });
       throw new Error(message);
     }
@@ -87,7 +87,7 @@ export function createAuthSessionController({ client, generation, loadRole, publ
       await resolveRole(data.user.id, version).catch(() => undefined);
     } catch (error) {
       if (!current()) return;
-      update({ ...emptyAuthSnapshot(generation, true), sessionStatus: 'error', sessionError: errorMessage(error, 'La session n’a pas pu être vérifiée. Réessayez.') });
+      update({ ...emptyAuthSnapshot(generation, true), sessionStatus: 'error', sessionError: userError(error, 'Votre connexion n’a pas pu être vérifiée. Réessayez.') });
     }
   }
 
@@ -117,7 +117,7 @@ export function createAuthSessionController({ client, generation, loadRole, publ
       acceptSession(data.session);
     } catch (error) {
       if (!active() || version !== sessionRevision) return;
-      update({ ...emptyAuthSnapshot(generation, true), sessionStatus: 'error', sessionError: errorMessage(error, 'Impossible de restaurer la session. Réessayez.') });
+      update({ ...emptyAuthSnapshot(generation, true), sessionStatus: 'error', sessionError: userError(error, 'Votre connexion n’a pas pu être rétablie. Réessayez.') });
     }
   }
 

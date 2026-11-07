@@ -21,8 +21,9 @@ const document = {
   school_name: 'École de test', subject_name: 'Mathématiques', deleted_at: null, deleted_by: null,
   status: 'pending', rejection_reason: null,
   reviewed_by: null, reviewed_at: null, created_at: '2026-01-01T00:00:00Z',
+  thumbnail_path: null, page_count: null,
 };
-const expectedDocumentSelect = 'id,user_id,title,description,file_name,file_path,file_type,file_size,created_at,school_name,subject_name,status,rejection_reason,reviewed_by,reviewed_at,deleted_at,deleted_by,profiles:profiles!documents_user_id_profiles_fkey(full_name,avatar_url,email)';
+const expectedDocumentSelect = 'id,user_id,title,description,file_name,file_path,file_type,file_size,created_at,school_name,subject_name,status,rejection_reason,reviewed_by,reviewed_at,deleted_at,deleted_by,thumbnail_path,page_count,profiles:profiles!documents_user_id_profiles_fkey(full_name,avatar_url,email)';
 const user = {
   id: userId, aud: 'authenticated', role: 'authenticated', email: author.email,
   app_metadata: {}, user_metadata: {}, identities: [], created_at: '2026-01-01T00:00:00Z',
@@ -130,6 +131,28 @@ function respondToLookup(table, url) {
   return jsonResponse(rows.map(profiles));
 }
 
+function respondToLibrary(body, url) {
+  assert.equal(url.searchParams.get('select'), expectedDocumentSelect);
+  assert.deepEqual(Object.keys(body).sort(), ['p_ascending', 'p_offset', 'p_pending', 'p_query', 'p_trash']);
+  assert.equal(typeof body.p_query, 'string');
+  for (const name of ['p_trash', 'p_pending', 'p_ascending']) assert.equal(typeof body[name], 'boolean');
+  assert.ok(Number.isSafeInteger(body.p_offset) && body.p_offset >= 0 && body.p_offset <= 100000);
+  if (failures.library) return jsonResponse(failures.library.data, failures.library.status);
+  // Simulation du contrat HTTP, pas une preuve d'exécution SQL ni des RLS.
+  const term = body.p_query.toLowerCase();
+  const rows = [...tables.documents.values()].filter((row) =>
+    (body.p_trash ? row.deleted_at !== null : row.deleted_at === null)
+    && (!body.p_pending || row.status === 'pending')
+    && (!term || ['title', 'description', 'file_name', 'school_name', 'subject_name']
+      .some((column) => (row[column] || '').toLowerCase().includes(term)))
+  );
+  rows.sort((a, b) => {
+    const direction = body.p_ascending ? 1 : -1;
+    return direction * (a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+  });
+  return jsonResponse(rows.slice(body.p_offset, body.p_offset + 20).map(profiles));
+}
+
 function respondToInsert(table, body) {
   assert.ok(Array.isArray(body) && body.length === 1, 'Une seule identité doit être insérée.');
   const row = { ...document, ...body[0] };
@@ -157,6 +180,9 @@ async function simulatedFetch(input, init = {}) {
   assert.equal(headers.get('authorization'), `Bearer ${accessToken}`);
   if (url.pathname === '/auth/v1/user' && method === 'GET') {
     return jsonResponse(verifiedUser);
+  }
+  if (url.pathname === '/rest/v1/rpc/list_library_documents' && method === 'POST') {
+    return respondToLibrary(body, url);
   }
   const table = url.pathname === '/rest/v1/documents' ? 'documents' : null;
   if (table) {
@@ -263,11 +289,38 @@ after(async () => {
   }
 });
 
-test('la bibliothèque joint explicitement profiles via la FK documents', async () => {
+test('la bibliothèque paginée joint explicitement profiles via la FK documents', async () => {
   const result = await library.fetchDashboardData(userId, false);
-  const documentRequest = requests.find(({ url }) => url.pathname === '/rest/v1/documents');
+  const [documentRequest] = requestsFor('POST', '/rest/v1/rpc/list_library_documents');
   assert.equal(documentRequest.url.searchParams.get('select'), expectedDocumentSelect);
+  assert.deepEqual(documentRequest.body, {
+    p_query: '', p_trash: false, p_pending: false, p_offset: 0, p_ascending: false,
+  });
+  assert.equal(requestsFor('GET', '/rest/v1/documents').length, 0);
   assert.equal(result.documents[0].author_name, author.full_name);
+  assert.equal(result.documents[0].thumbnail_path, null);
+  assert.equal(result.documents[0].page_count, null);
+});
+
+test('la recherche, la corbeille et la pagination sont envoyées à la RPC sans accorder un rôle', async () => {
+  const result = await library.fetchDashboardData(userId, true, undefined, {
+    query: '  %_Test,\\\\  ', trash: true, pending: true, offset: 20, ascending: true,
+  });
+  const [request] = requestsFor('POST', '/rest/v1/rpc/list_library_documents');
+  assert.deepEqual(request.body, {
+    p_query: '%_Test,\\\\', p_trash: true, p_pending: true, p_offset: 20, p_ascending: true,
+  });
+  assert.deepEqual(result.documents, []);
+  assert.ok(!Object.keys(request.body).some((key) => /user|admin|role/i.test(key)));
+});
+
+test('une erreur de RPC ou un décalage invalide ne devient pas une bibliothèque vide', async () => {
+  failures.library = { data: { code: '42501', message: 'Bibliothèque refusée dans la simulation.' }, status: 403 };
+  await assert.rejects(library.fetchDashboardData(userId, false), /Bibliothèque refusée dans la simulation/);
+  const count = requests.length;
+  await assert.rejects(library.fetchDashboardData(userId, false, undefined, { offset: -1 }), /page est indisponible/);
+  await assert.rejects(library.fetchDashboardData(userId, false, undefined, { offset: 0.5 }), /page est indisponible/);
+  assert.equal(requests.length, count);
 });
 
 test('un profil masqué par RLS ne fait pas disparaître le document', async () => {

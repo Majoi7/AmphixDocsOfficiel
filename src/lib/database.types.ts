@@ -1,4 +1,4 @@
-// Contrat local de V5 : à comparer avec la base après exécution manuelle.
+// Contrat local de V6 : à comparer avec la base après exécution manuelle.
 // Les libellés école/matière historiques peuvent être NULL ; les entités
 // normalisées et leurs relations sont réservées au LOT 2.
 export type ItemStatus = 'pending' | 'approved' | 'rejected';
@@ -32,6 +32,8 @@ export type DocumentRow = {
   reviewed_at: string | null;
   deleted_at: string | null;
   deleted_by: string | null;
+  thumbnail_path: string | null;
+  page_count: number | null;
 };
 
 export type DocumentTrashState = Pick<DocumentRow, 'id' | 'deleted_at' | 'deleted_by'>;
@@ -64,6 +66,18 @@ export interface Database {
     Views: { [key in never]: never };
     Functions: {
       is_admin: { Args: Record<string, never>; Returns: boolean };
+      list_library_documents: {
+        Args: { p_query?: string; p_trash?: boolean; p_pending?: boolean; p_offset?: number; p_ascending?: boolean };
+        Returns: DocumentRow[];
+      };
+      get_missing_document_previews: {
+        Args: { p_after_id?: string | null };
+        Returns: DocumentRow[];
+      };
+      set_document_preview: {
+        Args: { p_document_id: string; p_thumbnail_path: string; p_page_count: number | null };
+        Returns: DocumentRow[];
+      };
       set_document_trash: {
         Args: { p_document_id: string; p_deleted: boolean };
         Returns: DocumentTrashState[];

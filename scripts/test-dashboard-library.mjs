@@ -40,7 +40,7 @@ function document(index = 1, overrides = {}) {
     id: idOf(index), user_id: userId, title: `Cours ${index}`, description: null,
     file_name: `cours-${index}.pdf`, file_path: `${userId}/${idOf(index)}-cours-${index}.pdf`,
     file_size: 4, file_type: 'pdf', school_name: 'École de test', subject_name: 'Mathématiques',
-    deleted_at: null, deleted_by: null,
+    deleted_at: null, deleted_by: null, thumbnail_path: null, page_count: null,
     status: 'pending', rejection_reason: null, reviewed_by: null, reviewed_at: null,
     created_at: '2026-01-01T00:00:00Z', ...overrides,
   };
@@ -60,7 +60,7 @@ function controlled() {
   const reads = [];
   const controller = createController({
     scope: { ...scope }, isCurrent: () => current,
-    read: () => { const pending = deferred(); reads.push(pending); return pending.promise; },
+    read: (offset) => { const pending = { ...deferred(), offset }; reads.push(pending); return pending.promise; },
   });
   return { controller, reads, setCurrent: (next) => { current = next; } };
 }
@@ -76,7 +76,7 @@ test('le snapshot initial et les abonnements sont stables jusqu’à une publica
   const { controller } = state;
   const initial = controller.getSnapshot();
   assert.equal(controller.getSnapshot(), initial);
-  assert.deepEqual(initial, { ...data(), loading: true, error: null });
+  assert.deepEqual(initial, { ...data(), loading: true, loadingMore: false, hasMore: false, error: null });
   let notifications = 0;
   const unsubscribe = controller.subscribe(() => { notifications++; });
   await load(state, data([document()]));
@@ -233,7 +233,8 @@ test('une lecture échouée conserve les éléments chargés et confirmés, puis
   const failed = state.controller.getSnapshot();
   assert.deepEqual(documentIds(state.controller), [idOf(2), idOf(1)]);
   assert.equal(failed.loading, false);
-  assert.match(failed.error, /Lecture locale indisponible/);
+  assert.equal(failed.error, 'Impossible de charger la bibliothèque. Réessayez.');
+  assert.doesNotMatch(failed.error, /Lecture locale indisponible/);
   const retry = state.controller.refresh();
   assert.equal(state.controller.getSnapshot().loading, true);
   assert.equal(state.controller.getSnapshot().error, null);
@@ -318,4 +319,77 @@ test('une resouscription après nettoyage ne reçoit pas les réponses d’une a
   assert.equal(firstNotifications.length, 1);
   assert.equal(secondNotifications.length, 2);
   assert.deepEqual(secondNotifications.at(-1).documents.map((item) => item.id), [idOf(2)]);
+});
+
+const page = (first = 1, length = 20) => data(Array.from({ length }, (_, index) => document(first + index)));
+
+test('pages de vingt : offsets, déduplication et dernier lot partiel', async () => {
+  const state = controlled();
+  await load(state, page());
+  assert.equal(state.reads[0].offset, 0);
+  assert.equal(state.controller.getSnapshot().hasMore, true);
+  const next = state.controller.loadMore();
+  assert.equal(state.reads.at(-1).offset, 20);
+  assert.equal(state.controller.getSnapshot().loadingMore, true);
+  await state.controller.loadMore();
+  assert.equal(state.reads.length, 2);
+  state.reads.at(-1).resolve(page(20));
+  await next;
+  assert.equal(state.controller.getSnapshot().documents.length, 39);
+  const last = state.controller.loadMore();
+  assert.equal(state.reads.at(-1).offset, 40);
+  state.reads.at(-1).resolve(page(40, 3));
+  await last;
+  assert.equal(state.controller.getSnapshot().documents.length, 42);
+  assert.equal(state.controller.getSnapshot().hasMore, false);
+  await state.controller.loadMore();
+  assert.equal(state.reads.length, 3);
+});
+
+test('mutation puis lecture échouée : reprendre à zéro avant de poursuivre la pagination', async () => {
+  const state = controlled();
+  await load(state, page());
+  state.controller.removeDocument(idOf(1));
+  const failed = state.controller.loadMore();
+  assert.equal(state.reads.at(-1).offset, 0);
+  state.reads.at(-1).reject(new Error('Hors ligne'));
+  await failed;
+  const retry = state.controller.loadMore();
+  assert.equal(state.reads.at(-1).offset, 0);
+  state.reads.at(-1).resolve(page(2));
+  await retry;
+  const next = state.controller.loadMore();
+  assert.equal(state.reads.at(-1).offset, 20);
+  state.reads.at(-1).resolve(page(22, 2));
+  await next;
+  assert.equal(state.controller.getSnapshot().documents.length, 22);
+});
+
+test('une mutation pendant une page tardive impose une nouvelle première page', async () => {
+  const state = controlled();
+  await load(state, page());
+  const next = state.controller.loadMore();
+  state.controller.removeDocument(idOf(1));
+  state.reads.at(-1).resolve(page(21));
+  await next;
+  assert.equal(documentIds(state.controller).includes(idOf(1)), false);
+  const reconcile = state.controller.loadMore();
+  assert.equal(state.reads.at(-1).offset, 0);
+  state.reads.at(-1).resolve(page(2));
+  await reconcile;
+  const resumed = state.controller.loadMore();
+  assert.equal(state.reads.at(-1).offset, 20);
+  state.reads.at(-1).resolve(page(22, 0));
+  await resumed;
+  assert.equal(state.controller.getSnapshot().hasMore, false);
+});
+
+test('une page trop grande ne remplace pas les données confirmées', async () => {
+  const state = controlled();
+  await load(state, page());
+  const next = state.controller.loadMore();
+  state.reads.at(-1).resolve(page(21, 21));
+  await next;
+  assert.equal(state.controller.getSnapshot().documents.length, 20);
+  assert.ok(state.controller.getSnapshot().error);
 });

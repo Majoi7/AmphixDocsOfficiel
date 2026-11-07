@@ -12,6 +12,8 @@ export function readLibraryLocation(search: string) {
     query: view === 'home' ? '' : params.get('q') || '',
     showTrash: view === 'explore' && params.get('trash') === '1',
     panel,
+    documentId: !panel && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.get('document') || '')
+      ? params.get('document') : null,
   };
 }
 

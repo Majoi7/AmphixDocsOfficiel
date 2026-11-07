@@ -1,6 +1,6 @@
 import type { DocumentItem, DocumentTrashState } from './supabase';
 import { mergeUploadReport, type UploadBatchReport } from './upload-batch';
-import { errorMessage } from './errors';
+import { userError as errorMessage } from './errors';
 
 export interface DashboardLibraryData {
   documents: DocumentItem[];
@@ -12,6 +12,8 @@ export interface DashboardLibraryScope {
 }
 export interface DashboardLibrarySnapshot extends DashboardLibraryData {
   loading: boolean;
+  loadingMore: boolean;
+  hasMore: boolean;
   error: string | null;
 }
 
@@ -23,14 +25,20 @@ type Change = (data: DashboardLibraryData) => DashboardLibraryData;
 export function createDashboardLibraryController(dependencies: {
   scope: DashboardLibraryScope;
   isCurrent: () => boolean;
-  read: () => Promise<DashboardLibraryData>;
+  read: (offset: number) => Promise<DashboardLibraryData>;
+  // Projection des seules confirmations locales ; la requête SQL filtre la liste.
+  matches?: (document: DocumentItem) => boolean;
 }) {
   const scope = { ...dependencies.scope };
   const listeners = new Set<() => void>();
-  let snapshot: DashboardLibrarySnapshot = { documents: [], loading: true, error: null };
+  let snapshot: DashboardLibrarySnapshot = { documents: [], loading: true, loadingMore: false, hasMore: false, error: null };
   let requestNumber = 0;
   let reading = false;
   let changes: Change[] = [];
+  let nextOffset = 0;
+  let paginationDirty = false;
+  let mutationVersion = 0;
+  const pageSize = 20;
   // Un rapport cumulatif ancien ne doit pas annuler une édition, une mise en
   // corbeille, une restauration ou l'absence constatée lors d'une relecture.
   const handledDocumentIds = new Set<string>();
@@ -39,11 +47,46 @@ export function createDashboardLibraryController(dependencies: {
     snapshot = next;
     for (const listener of listeners) listener();
   };
+  const project = (data: DashboardLibraryData): DashboardLibraryData => ({
+    documents: dependencies.matches ? data.documents.filter(dependencies.matches) : data.documents,
+  });
   const confirm = (change: Change): boolean => {
     if (!dependencies.isCurrent()) return false;
+    paginationDirty = true;
+    mutationVersion++;
     if (reading) changes.push(change);
-    publish({ ...snapshot, ...change(snapshot) });
+    publish({ ...snapshot, ...project(change(snapshot)) });
     return true;
+  };
+  const readPage = async (append: boolean): Promise<void> => {
+    if (!dependencies.isCurrent()) return;
+    const request = ++requestNumber;
+    const offset = append ? nextOffset : 0;
+    reading = true;
+    changes = [];
+    const startedMutationVersion = mutationVersion;
+    if (!append) paginationDirty = true;
+    publish({ ...snapshot, loading: !append, loadingMore: append, error: null });
+    try {
+      const data = await dependencies.read(offset);
+      if (request !== requestNumber || !dependencies.isCurrent()) return;
+      if (data.documents.length > pageSize) throw new Error('La liste est indisponible. Réessayez.');
+      const seen = new Set(snapshot.documents.map((document) => document.id));
+      const base = append
+        ? { documents: [...snapshot.documents, ...data.documents.filter((document) => !seen.has(document.id))] }
+        : data;
+      const reconciled = project(changes.reduce((current, change) => change(current), base));
+      nextOffset = offset + data.documents.length;
+      paginationDirty = mutationVersion !== startedMutationVersion;
+      reading = false;
+      changes = [];
+      publish({ ...reconciled, loading: false, loadingMore: false, hasMore: data.documents.length === pageSize, error: null });
+    } catch (error) {
+      if (request !== requestNumber || !dependencies.isCurrent()) return;
+      reading = false;
+      changes = [];
+      publish({ ...snapshot, loading: false, loadingMore: false, error: errorMessage(error, 'Impossible de charger la bibliothèque. Réessayez.') });
+    }
   };
 
   return {
@@ -53,25 +96,12 @@ export function createDashboardLibraryController(dependencies: {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
-    async refresh(): Promise<void> {
-      if (!dependencies.isCurrent()) return;
-      const request = ++requestNumber;
-      reading = true;
-      changes = [];
-      publish({ ...snapshot, loading: true, error: null });
-      try {
-        const data = await dependencies.read();
-        if (request !== requestNumber || !dependencies.isCurrent()) return;
-        const reconciled = changes.reduce((current, change) => change(current), data);
-        reading = false;
-        changes = [];
-        publish({ ...reconciled, loading: false, error: null });
-      } catch (error) {
-        if (request !== requestNumber || !dependencies.isCurrent()) return;
-        reading = false;
-        changes = [];
-        publish({ ...snapshot, loading: false, error: errorMessage(error, 'Impossible de charger la bibliothèque. Réessayez.') });
-      }
+    refresh: () => readPage(false),
+    async loadMore(): Promise<void> {
+      if (reading || !snapshot.hasMore || !dependencies.isCurrent()) return;
+      // Une mutation peut décaler tous les offsets : repartir de la première
+      // page plutôt que sauter silencieusement un fichier.
+      await readPage(!paginationDirty);
     },
     cancelPending() {
       requestNumber++;

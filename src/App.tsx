@@ -16,19 +16,19 @@ import { AdminRoute } from './components/AdminRoute';
 import { AdminPage } from './pages/AdminPage';
 import { InstallPrompt } from './components/pwa/InstallPrompt';
 import { UpdateToast } from './components/pwa/UpdateToast';
-import { OfflinePage } from './components/pwa/OfflinePage';
 import { usePWA } from './hooks/usePWA';
 
 function AppContent() {
   const { isConfigModalOpen, setIsConfigModalOpen } = useAuth();
   const { isOnline } = usePWA();
 
-  if (!isOnline) {
-    return <OfflinePage onRetry={() => window.location.reload()} />;
-  }
-
+  // Une coupure réseau ne démonte ni le dashboard ni son formulaire. Le
+  // brouillon et les fichiers restent disponibles pour un nouvel essai.
   return (
     <>
+      {!isOnline && <p role="status" className="fixed inset-x-4 top-4 z-[45] mx-auto max-w-md rounded-2xl bg-[#141414] p-3 text-center text-sm text-[#f1ece4]">
+        Vous êtes hors ligne. Retrouvez une connexion pour envoyer vos fichiers.
+      </p>}
       <PageTransitionOverlay />
       <SupabaseConfigModal
         isOpen={isConfigModalOpen}

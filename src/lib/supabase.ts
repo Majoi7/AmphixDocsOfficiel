@@ -20,7 +20,7 @@ export type DocumentItem = DocumentRow & AuthorPresentation;
 export interface UserProfile extends ProfileRow { document_count: number }
 type AuthorRow = Pick<ProfileRow, 'full_name' | 'avatar_url' | 'email'>;
 type WithAuthor = DocumentRow & { profiles?: AuthorRow | null };
-const DOCUMENT_COLUMNS = 'id,user_id,title,description,file_name,file_path,file_type,file_size,created_at,school_name,subject_name,status,rejection_reason,reviewed_by,reviewed_at,deleted_at,deleted_by';
+const DOCUMENT_COLUMNS = 'id,user_id,title,description,file_name,file_path,file_type,file_size,created_at,school_name,subject_name,status,rejection_reason,reviewed_by,reviewed_at,deleted_at,deleted_by,thumbnail_path,page_count';
 const DOCUMENT_SELECT = `${DOCUMENT_COLUMNS},profiles:profiles!documents_user_id_profiles_fkey(full_name,avatar_url,email)`;
 export const MAX_DOCUMENT_SIZE = 20 * 1024 * 1024;
 export const MAX_CLASSIFICATION_LENGTH = 120;
@@ -72,10 +72,10 @@ export function compareDates(a: string | null, b: string | null, order: 'asc' | 
   return order === 'asc' ? first - second : second - first;
 }
 export const FILE_BADGES: Record<FileCategory, { label: string; bg: string; text: string; dot: string; border: string }> = {
-  pdf: { label: 'PDF', bg: 'bg-[#ff6a2b]/15', text: 'text-[#ff6a2b]', dot: 'bg-[#ff6a2b]', border: 'border-[#ff6a2b]/30' },
-  image: { label: 'Image', bg: 'bg-[#ffb6e1]/30', text: 'text-[#a11b61]', dot: 'bg-[#ffb6e1]', border: 'border-[#ffb6e1]/60' },
-  doc: { label: 'Document', bg: 'bg-[#9ab8ff]/25', text: 'text-[#2a4cb8]', dot: 'bg-[#9ab8ff]', border: 'border-[#9ab8ff]/50' },
-  autre: { label: 'Fichier', bg: 'bg-[#ffd23f]/25', text: 'text-[#8a6800]', dot: 'bg-[#ffd23f]', border: 'border-[#ffd23f]/50' },
+  pdf: { label: 'PDF', bg: 'bg-[#d83434]', text: 'text-white', dot: 'bg-[#d83434]', border: 'border-[#d83434]' },
+  image: { label: 'IMG', bg: 'bg-[#ffb6e1]', text: 'text-[#141414]', dot: 'bg-[#ffb6e1]', border: 'border-[#ffb6e1]' },
+  doc: { label: 'DOC', bg: 'bg-[#9ab8ff]', text: 'text-[#141414]', dot: 'bg-[#9ab8ff]', border: 'border-[#9ab8ff]' },
+  autre: { label: 'AUTRE', bg: 'bg-[#ffd23f]', text: 'text-[#141414]', dot: 'bg-[#ffd23f]', border: 'border-[#ffd23f]' },
 };
 export const STATUS_CONFIG = {
   pending: { label: 'En attente', bg: 'bg-[#ffd23f]/20', text: 'text-[#946200]', border: 'border-[#ffd23f]/60' },
@@ -91,14 +91,45 @@ export async function fetchUserRole(userId: string, client = getSupabaseClient()
   if (data.role !== 'admin' && data.role !== 'user') throw new Error('Le rôle du profil est invalide. Faites vérifier le contrat de la table profiles.');
   return data.role;
 }
-export async function fetchDashboardData(userId: string, _isAdmin?: boolean, client = getSupabaseClient()): Promise<{ documents: DocumentItem[] }> {
+export const LIBRARY_PAGE_SIZE = 20;
+export interface LibraryPageOptions { query?: string; trash?: boolean; pending?: boolean; offset?: number; ascending?: boolean }
+
+export async function fetchDashboardData(
+  userId: string, _isAdmin?: boolean, client = getSupabaseClient(), options: LibraryPageOptions = {}
+): Promise<{ documents: DocumentItem[] }> {
   assertUuid(userId, 'Identifiant du compte');
-  // Les RLS, pas un booléen React, déterminent les droits. Pas de !inner : un
-  // profil masqué ne doit pas masquer un fichier approuvé. Pagination : LOT 3/5.
-  const result = await client.from('documents').select(DOCUMENT_SELECT).order('created_at', { ascending: false });
-  if (result.error) throw new Error(`Impossible de charger les fichiers : ${errorMessage(result.error)} Vérifiez notamment la migration V5.`);
-  if (!Array.isArray(result.data)) throw new Error('La réponse de la bibliothèque est absente. Réessayez.');
+  const offset = options.offset ?? 0;
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error('Cette page est indisponible. Actualisez la liste.');
+  // Filtrage et limite sont exécutés en base AVANT la pagination. Le booléen
+  // d'interface n'accorde aucun droit : RPC invoker + RLS et contrôle SQL admin.
+  const result = await client.rpc('list_library_documents', {
+    p_query: options.query?.trim() || '', p_trash: options.trash ?? false,
+    p_pending: options.pending ?? false, p_offset: offset, p_ascending: options.ascending ?? false,
+  }).select(DOCUMENT_SELECT);
+  if (result.error) throw new Error(`Impossible de charger les fichiers : ${errorMessage(result.error)}`);
+  if (!Array.isArray(result.data) || result.data.length > LIBRARY_PAGE_SIZE) {
+    throw new Error('La liste est indisponible. Réessayez.');
+  }
   return { documents: result.data.map(mapDocument) };
+}
+
+// Une page « en attente » ne contient plus les documents approuvés. Leur
+// absence n'est pas une preuve : les confirmations relisent les cibles exactes.
+export async function fetchDocumentTargets(ids: readonly string[], actorId: string): Promise<DocumentItem[]> {
+  const targets = [...new Set(ids)];
+  targets.forEach((id) => assertUuid(id, 'Identifiant du fichier'));
+  if (targets.length === 0) return [];
+  return withUploadClient(actorId, getSupabaseClientState().config.url, async (client, check) => {
+    const documents: DocumentItem[] = [];
+    for (let offset = 0; offset < targets.length; offset += LIBRARY_PAGE_SIZE) {
+      check();
+      const result = await client.from('documents').select(DOCUMENT_SELECT).in('id', targets.slice(offset, offset + LIBRARY_PAGE_SIZE));
+      check();
+      if (result.error || !Array.isArray(result.data)) throw new Error(`Impossible de vérifier ces fichiers : ${errorMessage(result.error)}`);
+      documents.push(...result.data.map(mapDocument));
+    }
+    return documents;
+  });
 }
 
 export type UploadStage = 'transfert' | 'enregistrement' | 'verification' | 'termine';
@@ -365,8 +396,27 @@ export async function uploadUserDocument(
   if (identity && identity.filePath !== request.identity.filePath) throw new Error('L’identité du dépôt ne correspond pas au fichier.');
   return resumeUserDocument(request, file, onStage, getSupabaseClientState().config.url, identity ? 'resume' : 'initial');
 }
-export async function getDocumentSignedUrl(filePath: string): Promise<string> {
-  const { data, error } = await getSupabaseClient().storage.from('documents').createSignedUrl(filePath, 60);
+export async function getDocumentThumbnailUrls(paths: readonly string[], actorId: string): Promise<Record<string, string>> {
+  const unique = [...new Set(paths)];
+  if (!unique.length) return {};
+  return withUploadClient(actorId, getSupabaseClientState().config.url, async (client, check) => {
+    const urls: Record<string, string> = {};
+    for (let index = 0; index < unique.length; index += LIBRARY_PAGE_SIZE) {
+      check();
+      const batch = unique.slice(index, index + LIBRARY_PAGE_SIZE);
+      const result = await client.storage.from('document-thumbnails').createSignedUrls(batch, 120);
+      check();
+      if (result.error || !Array.isArray(result.data)) throw new Error(errorMessage(result.error, 'Aperçus indisponibles. Réessayez.'));
+      for (const item of result.data) {
+        if (!item.error && item.path && batch.includes(item.path) && item.signedUrl) urls[item.path] = item.signedUrl;
+      }
+    }
+    return urls;
+  });
+}
+
+export async function getDocumentSignedUrl(filePath: string, downloadName?: string): Promise<string> {
+  const { data, error } = await getSupabaseClient().storage.from('documents').createSignedUrl(filePath, 60, downloadName ? { download: downloadName } : undefined);
   if (error || !data?.signedUrl) throw new Error(`Impossible d’ouvrir le fichier : ${errorMessage(error, 'Le lien signé est absent.')}`);
   return data.signedUrl;
 }

@@ -10,6 +10,7 @@ import { errorMessage } from '../lib/errors';
 import { PendingList } from '../components/PendingList';
 import { UsersTable } from '../components/UsersTable';
 import { MobileNav } from '../components/mobile/MobileNav';
+import { useLibraryNavigation } from '../hooks/useLibraryNavigation';
 
 type AdminTab = 'pending' | 'users';
 type LibraryController = ReturnType<typeof createAdminLibraryController>;
@@ -18,15 +19,17 @@ const buttonClass = 'inline-flex min-h-11 min-w-11 items-center justify-center g
 export function AdminPage() {
   const { user, isAdmin, signOut } = useAuth();
   const navigate = useNavigate();
+  const navigation = useLibraryNavigation();
   const reducedMotion = useReducedMotion();
   const { client, generation, config: { url: projectUrl } } = useSyncExternalStore(subscribeSupabaseClient, getSupabaseClientState, getSupabaseClientState);
   const userId = user?.id || '';
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const libraryRef = useRef<LibraryController | null>(null);
   const library = useMemo(() => {
     const controller = createAdminLibraryController({
       isCurrent: () => libraryRef.current === controller && !!userId && !!client && isAdmin
         && getSupabaseClientState().generation === generation && getSupabaseClientState().client === client,
-      read: async () => {
+      read: async (offset) => {
         if (!client) throw new Error('Aucun projet connecté. Rétablissez la configuration avant de réessayer.');
         const checkAccount = async () => {
           const { data, error } = await client.auth.getSession();
@@ -34,7 +37,7 @@ export function AdminPage() {
         };
         await checkAccount();
         const [dashboard, users] = await Promise.all([
-          fetchDashboardData(userId, true, client),
+          fetchDashboardData(userId, true, client, { pending: true, offset, ascending: sortOrder === 'asc' }),
           fetchUsersList(client),
         ]);
         await checkAccount();
@@ -45,10 +48,10 @@ export function AdminPage() {
       },
     });
     return controller;
-  }, [userId, projectUrl, generation, client, isAdmin]);
+  }, [userId, projectUrl, generation, client, isAdmin, sortOrder]);
   // Invalider l'ancien compte dès le rendu, sans attendre le nettoyage des effets.
   libraryRef.current = library;
-  const { documents, users, loading, hasLoaded, error } = useSyncExternalStore(library.subscribe, library.getSnapshot, library.getSnapshot);
+  const { documents, users, loading, loadingMore, hasMore, hasLoaded, error } = useSyncExternalStore(library.subscribe, library.getSnapshot, library.getSnapshot);
   const [activeTab, setActiveTab] = useState<AdminTab>('pending');
   const [pendingInteraction, setPendingInteraction] = useState(false);
   const [usersInteraction, setUsersInteraction] = useState(false);
@@ -60,7 +63,11 @@ export function AdminPage() {
   const avatarMenuRef = useRef<HTMLDivElement>(null);
   const avatarButtonRef = useRef<HTMLButtonElement>(null);
   const sectionsId = useId();
-  const interaction = pendingInteraction || usersInteraction;
+  const interaction = pendingInteraction || usersInteraction || !!navigation.documentId || !!navigation.panel;
+
+  useEffect(() => {
+    if (navigation.documentId) setActiveTab('pending');
+  }, [navigation.documentId]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -131,14 +138,14 @@ export function AdminPage() {
   return (
     <div className="flex min-h-dvh min-w-0 flex-col bg-[#f1ece4] text-[#141414] selection:bg-[#ff6a2b] selection:text-[#141414]">
       <header className="safe-top sticky top-0 z-40 border-b border-[#141414]/10 bg-[#f1ece4]/90 backdrop-blur">
-        <div className="mx-auto flex min-h-16 max-w-6xl items-center justify-between gap-2 px-4 sm:px-8">
+        <div className="mx-auto flex min-h-13 md:min-h-16 max-w-6xl items-center justify-between gap-2 px-4 sm:px-8">
           <div className="flex min-w-0 items-center gap-2">
             <Link to="/dashboard" className={`${buttonClass} px-0 text-xl font-extrabold tracking-tight`} aria-label="AmphixDocs, retour à l’accueil">
               <span>Amphix<span className="text-[#ff6a2b]">Docs</span></span>
             </Link>
-            <span className="rounded-full bg-[#ff6a2b] px-2 py-1 text-xs font-bold">Admin</span>
+            <span className="hidden rounded-full bg-[#ff6a2b] px-2 py-1 text-xs font-bold md:inline">Admin</span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="hidden items-center gap-2 md:flex">
             <Link to="/dashboard" className={`${buttonClass} hidden bg-white sm:inline-flex`}>
               <LayoutDashboard className="h-4 w-4" aria-hidden="true" /> Bibliothèque
             </Link>
@@ -202,7 +209,9 @@ export function AdminPage() {
           <section id={`${sectionsId}-panel-${activeTab}`} aria-labelledby={`${sectionsId}-${activeTab}`} aria-busy={loading} className="min-w-0">
             {activeTab === 'pending' ? (
               <PendingList key={`${generation}:${userId}:pending`} documents={documents} currentUserId={userId} onRefresh={library.refresh}
-                isCurrent={library.isCurrent} disabled={actionsDisabled} onInteractionChange={setPendingInteraction} />
+                onLoadMore={library.loadMore} loading={loading} loadingMore={loadingMore} hasMore={hasMore} hasError={!!error}
+                isCurrent={library.isCurrent} disabled={actionsDisabled} onInteractionChange={setPendingInteraction}
+                sortOrder={sortOrder} onSortChange={setSortOrder} />
             ) : (
               <UsersTable key={`${generation}:${userId}:users`} users={users} currentUserId={userId} onRefresh={library.refresh}
                 isCurrent={library.isCurrent} disabled={actionsDisabled} onInteractionChange={setUsersInteraction} />

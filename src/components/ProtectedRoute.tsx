@@ -6,13 +6,13 @@ import { useAuth } from '../context/AuthContext';
 
 export const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const {
-    user, loading, sessionError, roleError, configError, isConfigured,
+    user, loading, sessionError, roleError, isConfigured,
     retrySession, refreshUserRole, setIsConfigModalOpen,
   } = useAuth();
   const reducedMotion = useReducedMotion();
 
   if (!isConfigured || sessionError || roleError) {
-    const message = sessionError || roleError || configError || 'Enregistrez une configuration Supabase publique valide pour accéder à votre espace.';
+    const message = !isConfigured ? 'Le service est momentanément indisponible. Réessayez plus tard.' : 'Votre connexion n’a pas pu être vérifiée. Réessayez.';
     return (
       <main className="min-h-dvh bg-[#f1ece4] flex flex-col items-center justify-center p-6 text-center gap-4">
         <AlertCircle className="w-8 h-8 text-[#ff6a2b]" aria-hidden="true" />
@@ -21,13 +21,13 @@ export const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ childr
         <div className="flex flex-wrap justify-center gap-3">
           {isConfigured && (
             <button type="button" onClick={() => { void (sessionError ? retrySession() : refreshUserRole()).catch(() => undefined); }}
-              className="px-5 py-3 rounded-full bg-[#ff6a2b] text-white text-sm font-bold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0]">
+              className="px-5 py-3 rounded-full bg-[#ff6a2b] text-white text-sm font-bold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff6a2b]">
               Réessayer la vérification
             </button>
           )}
           <button type="button" onClick={() => setIsConfigModalOpen(true)}
-            className="px-5 py-3 rounded-full border-2 border-[#141414]/30 text-sm font-bold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0]">
-            Vérifier la configuration
+            className="px-5 py-3 rounded-full border-2 border-[#141414]/30 text-sm font-bold focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff6a2b]">
+            Aide à la connexion
           </button>
         </div>
       </main>
@@ -48,7 +48,7 @@ export const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ childr
             <span className="text-xs font-black">✦</span>
           </div>
         </motion.div>
-        <p className="mt-6 font-bold text-[#141414] text-lg tracking-tight">Vérification de votre session et de votre profil…</p>
+        <p className="mt-6 font-bold text-[#141414] text-lg tracking-tight">Vérification de votre connexion…</p>
       </div>
     );
   }

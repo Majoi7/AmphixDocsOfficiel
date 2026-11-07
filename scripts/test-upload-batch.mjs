@@ -148,7 +148,8 @@ test('une exception non typée reste indéterminée, pas un succès', async () =
   }), noChange, noChange);
   assert.equal(result.entries[0].failureKind, 'uncertain');
   assert.equal(result.entries[0].document, null);
-  assert.match(result.entries[0].error, /Réponse perdue/);
+  assert.equal(result.entries[0].error, 'L’envoi n’a pas pu être terminé. Réessayez ; les fichiers déjà envoyés sont conservés.');
+  assert.doesNotMatch(result.entries[0].error, /Réponse perdue/);
   assert.equal(library.isUploadBatchComplete(result), false);
 });
 
@@ -216,7 +217,8 @@ test('une notification défaillante ne transforme pas les écritures confirmées
   const first = await library.runUploadBatch(batch([prepared(1), prepared(2)]), dependencies(), noChange,
     () => { throw new Error('Affichage indisponible localement'); });
   assert.equal(library.isUploadBatchComplete(first), true);
-  assert.match(first.notificationError, /écritures confirmées restent confirmées/);
+  assert.equal(first.notificationError, 'La liste n’a pas pu être actualisée. Vos fichiers envoyés sont conservés. Actualisez la bibliothèque.');
+  assert.doesNotMatch(first.notificationError, /Affichage indisponible localement/);
   let writes = 0;
   const reports = [];
   const resumed = await library.runUploadBatch(first, dependencies({
@@ -232,7 +234,8 @@ test('une exception de publication locale n’annule pas les confirmations dista
   const result = await library.runUploadBatch(batch(), dependencies(),
     () => { throw new Error('Publication locale impossible'); }, noChange);
   assert.equal(result.entries[0].status, 'confirmed');
-  assert.match(result.notificationError, /Publication locale impossible/);
+  assert.equal(result.notificationError, 'La liste n’a pas pu être actualisée. Vos fichiers envoyés sont conservés. Actualisez la bibliothèque.');
+  assert.doesNotMatch(result.notificationError, /Publication locale impossible/);
 });
 
 test('une trace restaurée revérifie toutes les identités sans supposer un succès ni un fichier local', async () => {
