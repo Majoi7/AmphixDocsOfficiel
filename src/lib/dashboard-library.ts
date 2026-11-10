@@ -1,5 +1,6 @@
 import type { DocumentItem, DocumentTrashState } from './supabase';
 import { mergeUploadReport, type UploadBatchReport } from './upload-batch';
+import { mergeDocumentPreview } from './preview-completion';
 import { userError as errorMessage } from './errors';
 
 export interface DashboardLibraryData {
@@ -116,6 +117,14 @@ export function createDashboardLibraryController(dependencies: {
       report.documents.forEach((document) => handledDocumentIds.add(document.id));
       if (documents.length === 0) return true;
       return confirm((data) => mergeUploadReport(data, { ...report, documents }));
+    },
+    // Ne projeter que les colonnes d'aperçu réellement confirmées. Un détail
+    // hors page n'ajoute pas de document et ne change pas l'ordre de la liste.
+    updateDocumentPreview(document: DocumentItem): boolean {
+      if (!dependencies.isCurrent()) return false;
+      return confirm((data) => ({
+        documents: data.documents.map((existing) => mergeDocumentPreview(existing, document)),
+      }));
     },
     updateDocumentMetadata(id: string, title: string, description: string): boolean {
       if (!dependencies.isCurrent()) return false;

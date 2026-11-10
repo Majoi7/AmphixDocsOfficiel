@@ -117,6 +117,48 @@ test('une confirmation de lot pendant une lecture tardive n’est pas effacée p
   assert.equal(state.controller.getSnapshot().loading, false);
 });
 
+test('un aperçu confirmé conserve les métadonnées, l’ordre et les documents hors page', async () => {
+  const state = controlled();
+  const existing = document(1, { title: 'Titre récent', description: 'Description corrigée', status: 'approved' });
+  await load(state, data([existing, document(2)]));
+  const preview = document(1, { thumbnail_path: `${userId}/${idOf(1)}/${'a'.repeat(64)}.jpg`, page_count: 24 });
+  assert.equal(state.controller.updateDocumentPreview(preview), true);
+  assert.deepEqual(state.controller.getSnapshot().documents[0], { ...existing, thumbnail_path: preview.thumbnail_path, page_count: 24 });
+  state.controller.updateDocumentPreview(document(99, { thumbnail_path: 'hors-page.jpg', page_count: 1 }));
+  assert.deepEqual(documentIds(state.controller), [idOf(1), idOf(2)]);
+});
+
+test('un aperçu reçu pendant une lecture est rejoué sans annuler une édition confirmée', async () => {
+  const state = controlled();
+  await load(state, data([document()]));
+  const reading = state.controller.refresh();
+  const preview = document(1, { thumbnail_path: `${userId}/${idOf(1)}/${'a'.repeat(64)}.jpg`, page_count: 7 });
+  state.controller.updateDocumentMetadata(idOf(1), 'Titre modifié', 'Description récente');
+  state.controller.updateDocumentPreview(preview);
+  state.reads.at(-1).resolve(data([document()]));
+  await reading;
+  assert.deepEqual(state.controller.getSnapshot().documents[0], {
+    ...document(), title: 'Titre modifié', description: 'Description récente',
+    thumbnail_path: preview.thumbnail_path, page_count: 7,
+  });
+  await load(state, data());
+  state.controller.updateDocumentPreview(preview);
+  assert.deepEqual(documentIds(state.controller), [], 'Une lecture ultérieure vide reste autoritaire.');
+});
+
+test('un aperçu ne restaure ni un document en corbeille ni un ancien compte', async () => {
+  const state = controlled();
+  const trashed = document(1, { deleted_at: '2026-01-03T00:00:00Z', deleted_by: userId });
+  await load(state, data([trashed]));
+  const preview = document(1, { thumbnail_path: `${userId}/${idOf(1)}/${'a'.repeat(64)}.jpg`, page_count: 3 });
+  state.controller.updateDocumentPreview(preview);
+  assert.equal(state.controller.getSnapshot().documents[0], trashed);
+  state.setCurrent(false);
+  const previous = state.controller.getSnapshot();
+  assert.equal(state.controller.updateDocumentPreview(preview), false);
+  assert.equal(state.controller.getSnapshot(), previous);
+});
+
 test('un document déjà présent dans la lecture et dans le rapport n’est pas dupliqué', async () => {
   const state = controlled();
   const loading = state.controller.refresh();

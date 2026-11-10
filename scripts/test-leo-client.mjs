@@ -190,6 +190,39 @@ test('mutations confirmées : retrait des liens et explications devenus obsolèt
   f.session.removeDocument(id(1)); assert.equal(f.session.getSnapshot().entries[0].documents.length, 0);
   assert.equal(f.session.getSnapshot().entries[0].candidates.length, 0);
 });
+test('aperçu confirmé : résultats et candidats complétés sans perdre les explications', async () => {
+  const existing = document(1, { title: 'Titre récent', description: 'Description récente' });
+  const f = fixture({ rank: { documents: [existing] } });
+  await f.session.submit('Algèbre');
+  const previous = f.session.getSnapshot().entries[0];
+  const preview = document(1, { thumbnail_path: `${actor}/${id(1)}/${'a'.repeat(64)}.jpg` });
+  f.session.updateDocumentPreview(preview);
+  const result = f.session.getSnapshot().entries[0];
+  const expected = { ...existing, thumbnail_path: preview.thumbnail_path };
+  assert.deepEqual(result.documents, [expected]);
+  assert.deepEqual(result.candidates, [expected]);
+  assert.equal(result.explanations, previous.explanations);
+  assert.equal(f.calls.length, 3, 'Aucune nouvelle recherche ni classement.');
+});
+test('aperçu Léo : identité, compte immuable, retrait et ancien scope respectés', async () => {
+  const f = fixture(); await f.session.submit('Algèbre');
+  const existing = f.session.getSnapshot().entries[0].documents[0];
+  const preview = document(1, { thumbnail_path: `${actor}/${id(1)}/${'a'.repeat(64)}.jpg` });
+  for (const changes of [{ user_id: id(99) }, { file_path: 'autre.pdf' }, { page_count: 4 }, { deleted_at: '2026-01-03T00:00:00Z' }]) {
+    f.session.updateDocumentPreview({ ...preview, ...changes });
+    assert.equal(f.session.getSnapshot().entries[0].documents[0], existing);
+  }
+  f.session.updateDocumentPreview(document(99, { thumbnail_path: 'hors-resultats.jpg' }));
+  assert.deepEqual(f.session.getSnapshot().entries[0].documents.map((item) => item.id), [id(1)]);
+  f.session.removeDocument(id(1));
+  f.session.updateDocumentPreview(preview);
+  assert.deepEqual(f.session.getSnapshot().entries[0].documents, []);
+  assert.deepEqual(f.session.getSnapshot().entries[0].candidates, []);
+  f.invalidate();
+  const before = f.session.getSnapshot();
+  f.session.updateDocumentPreview(preview);
+  assert.equal(f.session.getSnapshot(), before);
+});
 test('transport JWT utilisateur, clé publique, no-store, aucun secret Gemini', async () => {
   const f = transport(); const response = await f.request({ action: 'plan', prompt: 'Algèbre' }, new AbortController().signal);
   assert.equal(response.action, 'plan'); const sent = f.seen[0];

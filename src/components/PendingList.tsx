@@ -183,6 +183,11 @@ export function PendingList({ documents, onRefresh, onLoadMore, currentUserId, i
     {navigation.documentId && <DocumentDetails documentId={navigation.documentId}
       thumbnailUrl={selected?.thumbnail_path ? previews.urls[selected.thumbnail_path] : undefined}
       refreshVersion={detailVersion} onClose={navigation.closeDocument} disabled={disabled || !!action} blocked={isWorking}
+      onPreviewCompleted={() => {
+        // La modération en cours fait déjà sa propre relecture autoritaire.
+        // Hors mutation, le contrôleur parent expose toute erreur de cette lecture.
+        if (mountedRef.current && isCurrent() && !operationRef.current) void onRefresh().catch(() => undefined);
+      }}
       onModerate={(document, status) => openAction([document.id], status, document.title)} />}
     <BottomSheet isOpen={action !== null} onClose={closeAction} canClose={!isWorking} title={action?.collective ? 'Approbation collective' : action?.intent.status === 'rejected' ? 'Refuser un fichier' : 'Approuver un fichier'}>
       {action && <form onSubmit={(event) => { event.preventDefault(); void performAction(); }} className="min-w-0 space-y-4">

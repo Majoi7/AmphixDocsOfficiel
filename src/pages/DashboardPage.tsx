@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { motion, useReducedMotion } from 'motion/react';
 import { Compass, Plus, Search, Trash2, UserRound, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { fetchDashboardData, setDocumentTrash, updateDocumentMetadata } from '../lib/supabase';
+import { fetchDashboardData, setDocumentTrash, updateDocumentMetadata, type DocumentItem } from '../lib/supabase';
 import { createDashboardLibraryController } from '../lib/dashboard-library';
 import { getSupabaseClientState, subscribeSupabaseClient } from '../lib/supabase-config';
 import type { UploadBatchReport } from '../lib/upload-batch';
@@ -123,6 +123,10 @@ export function DashboardPage() {
     const leoDocument = leoSession.getSnapshot().entries.flatMap((entry) => [...entry.documents, ...entry.candidates]).find((document) => document.id === id);
     if (leoDocument) leoSession.updateDocument({ ...leoDocument, title: title.trim(), description: description.trim() || null });
   };
+  const handlePreviewCompleted = (document: DocumentItem) => {
+    if (!library.updateDocumentPreview(document)) return;
+    leoSession.updateDocumentPreview(document);
+  };
   const handleTrashDocument = async (id: string, deleted: boolean) => {
     checkLibraryScope();
     const state = await setDocumentTrash(id, deleted, userId);
@@ -217,7 +221,8 @@ export function DashboardPage() {
       {isLeoOpen && <LeoPanel session={leoSession} snapshot={leoSnapshot} onClose={navigation.closePanel} onOpenDocument={navigation.openDocument} />}
       {navigation.documentId && <DocumentDetails documentId={navigation.documentId}
         thumbnailUrl={selectedDocument?.thumbnail_path ? previews.urls[selectedDocument.thumbnail_path] : undefined}
-        onClose={navigation.closeDocument} onUpdate={handleUpdateDocument} onTrash={handleTrashDocument} />}
+        onClose={navigation.closeDocument} onUpdate={handleUpdateDocument} onTrash={handleTrashDocument}
+        onPreviewCompleted={handlePreviewCompleted} />}
       <MobileNav isModalOpen={overlayOpen} />
     </motion.div>
   );

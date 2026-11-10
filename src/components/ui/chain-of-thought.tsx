@@ -62,8 +62,7 @@ export function AiChainOfThoughtHeader({ title = 'Réflexion de Léo', stepCount
       <span className="min-w-0 flex-1 text-sm font-semibold break-words">{children ?? title}</span>
       {total !== undefined && (
         <span className="shrink-0 rounded-full bg-[#ededed] px-2 py-0.5 text-xs font-medium tabular-nums">
-          <span aria-hidden="true">{done === undefined ? `${total} étape${total > 1 ? 's' : ''}` : `${done}/${total}`}</span>
-          <span className="sr-only">{done === undefined ? `${total} étape${total > 1 ? 's' : ''}` : `${done} étape${done > 1 ? 's' : ''} terminée${done > 1 ? 's' : ''} sur ${total}`}</span>
+          {done === undefined ? `${total} étape${total > 1 ? 's' : ''}` : `${done}/${total} étape${total > 1 ? 's' : ''}`}
         </span>
       )}
       <ChevronDown aria-hidden="true" className={cn('size-4 shrink-0 text-[#141414]/60 transition-transform motion-reduce:transition-none', isOpen && 'rotate-180')} />

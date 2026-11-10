@@ -1,14 +1,13 @@
 import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
-import { Check, Download, Loader2, Pencil, RotateCcw, Trash2, X } from 'lucide-react';
+import { Check, Pencil, RotateCcw, Trash2, X } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { fetchDocumentTargets, formatDateFrench, formatFileSize, STATUS_CONFIG, type DocumentItem } from '../lib/supabase';
 import { getSupabaseClientState, subscribeSupabaseClient } from '../lib/supabase-config';
-import { errorMessage } from '../lib/errors';
-import { useDocumentLink } from '../hooks/useDocumentLink';
-import { useDocumentThumbnails } from '../hooks/useDocumentThumbnails';
+import { userError } from '../lib/errors';
+import { mergeDocumentPreview } from '../lib/preview-completion';
 import { usePendingNavigation } from '../hooks/usePendingNavigation';
 import { BottomSheet } from './mobile/BottomSheet';
-import { DocumentPreview } from './DocumentPreview';
+import { DocumentFileViewer } from './DocumentFileViewer';
 
 interface DocumentDetailsProps {
   documentId: string;
@@ -17,6 +16,7 @@ interface DocumentDetailsProps {
   onUpdate?: (id: string, title: string, description: string) => Promise<void>;
   onTrash?: (id: string, deleted: boolean) => Promise<void>;
   onModerate?: (document: DocumentItem, status: 'approved' | 'rejected') => void;
+  onPreviewCompleted?: (document: DocumentItem) => void;
   disabled?: boolean;
   blocked?: boolean;
   refreshVersion?: number;
@@ -33,7 +33,7 @@ export function DocumentDetails(props: DocumentDetailsProps) {
   return <ScopedDocumentDetails key={scope} {...props} actorId={user?.id || ''} generation={generation} isAdmin={isAdmin} />;
 }
 
-function ScopedDocumentDetails({ documentId, thumbnailUrl, onClose, onUpdate, onTrash, onModerate, disabled = false, blocked = false, refreshVersion = 0, actorId, generation, isAdmin }: DocumentDetailsProps & {
+function ScopedDocumentDetails({ documentId, onClose, onUpdate, onTrash, onModerate, onPreviewCompleted, disabled = false, blocked = false, refreshVersion = 0, actorId, generation, isAdmin }: DocumentDetailsProps & {
   actorId: string; generation: number; isAdmin: boolean;
 }) {
   const [document, setDocument] = useState<DocumentItem | null>(null);
@@ -53,8 +53,6 @@ function ScopedDocumentDetails({ documentId, thumbnailUrl, onClose, onUpdate, on
   const editButton = useRef<HTMLButtonElement>(null);
   const titleId = useId();
   const descriptionId = useId();
-  const link = useDocumentLink(document?.file_path || '', document?.file_name);
-  const previews = useDocumentThumbnails(document && !thumbnailUrl ? [document] : []);
   const working = busy || blocked;
   usePendingNavigation(working);
   const current = () => mounted.current && getSupabaseClientState().generation === generation;
@@ -67,7 +65,7 @@ function ScopedDocumentDetails({ documentId, thumbnailUrl, onClose, onUpdate, on
       if (cancelled || getSupabaseClientState().generation !== generation) return;
       setDocument(targets.find((item) => item.id === documentId) || null);
     }).catch((cause) => {
-      if (!cancelled && getSupabaseClientState().generation === generation) setLoadError(errorMessage(cause, 'Impossible de charger ce fichier. Réessayez.'));
+      if (!cancelled && getSupabaseClientState().generation === generation) setLoadError(userError(cause, 'Impossible de charger ce fichier. Réessayez.'));
     }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [documentId, actorId, generation, revision, refreshVersion]);
@@ -85,7 +83,7 @@ function ScopedDocumentDetails({ documentId, thumbnailUrl, onClose, onUpdate, on
     setActionError(null);
     setNotice(null);
     try { await action(); }
-    catch (cause) { if (current()) setActionError(errorMessage(cause, fallback)); }
+    catch (cause) { if (current()) setActionError(userError(cause, fallback)); }
     finally { operation.current = false; if (current()) setBusy(false); }
   };
   const save = () => {
@@ -94,7 +92,8 @@ function ScopedDocumentDetails({ documentId, thumbnailUrl, onClose, onUpdate, on
     void run(async () => {
       await onUpdate(document.id, title.trim(), description.trim());
       if (!current()) return;
-      setDocument({ ...document, title: title.trim(), description: description.trim() || null });
+      setDocument((previous) => previous && previous.id === document.id
+        ? { ...previous, title: title.trim(), description: description.trim() || null } : previous);
       setEditing(false);
       setNotice('Modifications enregistrées.');
       requestAnimationFrame(() => { if (mounted.current) editButton.current?.focus(); });
@@ -112,8 +111,13 @@ function ScopedDocumentDetails({ documentId, thumbnailUrl, onClose, onUpdate, on
       <p role="alert" className="text-sm text-red-800">{loadError}</p>
       <button type="button" onClick={() => setRevision((value) => value + 1)} className={`${buttonClass} bg-white`}>Réessayer</button>
     </div> : !document ? <p role="status" className="py-6 text-sm">Ce fichier n’est pas disponible pour votre compte.</p> : <div className="min-w-0 space-y-5">
-      <div className="mx-auto w-full max-w-xs"><DocumentPreview document={document} large url={thumbnailUrl || (document.thumbnail_path ? previews.urls[document.thumbnail_path] : undefined)} loading={previews.loading} /></div>
-      {previews.error && <div className="text-sm"><p role="status">{previews.error}</p><button type="button" onClick={previews.retry} className={`${buttonClass} mt-2 bg-white`}>Recharger l’aperçu</button></div>}
+      <DocumentFileViewer document={document} actorId={actorId} generation={generation} disabled={working}
+        onCompleted={(confirmed) => {
+          if (!current()) return;
+          setDocument((previous) => previous ? mergeDocumentPreview(previous, confirmed) : previous);
+          // Notifier hors de l'updater React, qui peut être rejoué en StrictMode.
+          onPreviewCompleted?.(confirmed);
+        }} />
       <div className="min-w-0"><h3 className="break-words text-xl font-extrabold">{document.title}</h3>
         <p className="mt-1 break-words text-sm text-[#141414]/70">{document.school_name || 'École non renseignée'} · {document.subject_name || 'Matière non renseignée'}</p>
         <span className={`mt-3 inline-flex rounded-full px-3 py-1 text-xs font-bold ${STATUS_CONFIG[document.status].bg} ${STATUS_CONFIG[document.status].text}`}>{STATUS_CONFIG[document.status].label}</span>
@@ -127,11 +131,6 @@ function ScopedDocumentDetails({ documentId, thumbnailUrl, onClose, onUpdate, on
         <div className="flex flex-wrap gap-x-2"><dt>Taille :</dt><dd>{formatFileSize(document.file_size)}</dd></div>
         <div><dt>Fichier :</dt><dd className="break-words">{document.file_name}</dd></div>
       </dl>
-      {link.url ? <a href={link.url} download={document.file_name} target="_blank" rel="noopener noreferrer" className={`${buttonClass} w-full bg-[#ff6a2b]`}><Download size={18} aria-hidden="true" />Télécharger</a>
-        : <button type="button" disabled={busy || link.isPreparing} onClick={() => void link.prepareLink()} className={`${buttonClass} w-full bg-[#ff6a2b]`}>
-          {link.isPreparing ? <Loader2 size={18} aria-hidden="true" className="animate-spin motion-reduce:animate-none" /> : <Download size={18} aria-hidden="true" />}{link.isPreparing ? 'Préparation…' : 'Préparer le téléchargement'}
-        </button>}
-      {link.linkError && <p role="alert" className="text-sm text-red-800">{link.linkError}</p>}
       {canManage && onUpdate && document.deleted_at === null && (editing ? <form onSubmit={(event) => { event.preventDefault(); save(); }} className="space-y-3 border-t border-[#141414]/15 pt-4">
         <div><label htmlFor={titleId} className="mb-1 block text-sm font-bold">Titre</label><input ref={titleInput} id={titleId} className={fieldClass} value={title} required disabled={busy} onChange={(event) => setTitle(event.target.value)} /></div>
         <div><label htmlFor={descriptionId} className="mb-1 block text-sm font-bold">Description</label><textarea id={descriptionId} className={fieldClass} value={description} maxLength={200} rows={3} disabled={busy} onChange={(event) => setDescription(event.target.value)} /><p className="text-right text-xs text-[#141414]/60">{description.length}/200</p></div>

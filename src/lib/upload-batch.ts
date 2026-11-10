@@ -1,5 +1,6 @@
 import type { DocumentItem, UploadDocumentRequest, UploadFailureKind, UploadStage } from './supabase';
-import { userError } from './errors';
+import { logDevelopmentError, userError } from './errors';
+import { assertPreviewIdentity, needsDocumentPreview } from './preview-completion';
 
 export type BatchEntryStatus = 'pending' | 'working' | 'confirmed' | 'error';
 export interface UploadBatchEntry {
@@ -58,6 +59,7 @@ export interface UploadBatchDependencies {
     onStage: (stage: UploadStage) => void, projectUrl: string,
     mode: 'initial' | 'resume'
   ) => Promise<DocumentItem>;
+  completePreview?: (document: DocumentItem, file: File | undefined) => Promise<DocumentItem>;
 }
 export interface UploadJournalStorage {
   getItem: (key: string) => string | null;
@@ -169,6 +171,19 @@ export async function runUploadBatch(
             : 'L’envoi n’a pas pu être terminé. Réessayez ; les fichiers déjà envoyés sont conservés.';
       updateEntry(index, { status: 'error', document: null, error: userError(error, message), failureKind: kind });
       if (kind === 'scope') break;
+    }
+    // Le document principal est déjà confirmé. Une erreur d'aperçu ne passe
+    // jamais dans le catch de l'envoi et ne recrée pas une identité au réessai.
+    const confirmed = current.entries[index].document;
+    if (confirmed && dependencies.completePreview && dependencies.isCurrent() && needsDocumentPreview(confirmed)) {
+      try {
+        const previewed = await dependencies.completePreview(confirmed, entry.file);
+        if (!dependencies.isCurrent()) break;
+        assertPreviewIdentity(confirmed, previewed);
+        if (needsDocumentPreview(previewed)) throw new Error('Aperçu non confirmé.');
+        updateEntry(index, { document: previewed });
+      } catch (error) { logDevelopmentError(error, 'Aperçu facultatif'); }
+      if (!dependencies.isCurrent()) break;
     }
     report();
   }

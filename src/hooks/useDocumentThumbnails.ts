@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { getDocumentThumbnailUrls, type DocumentItem } from '../lib/supabase';
 import { getSupabaseClientState, subscribeSupabaseClient } from '../lib/supabase-config';
-import { errorMessage } from '../lib/errors';
+import { userError } from '../lib/errors';
 
 interface SignedThumbnails {
   scope: string;
@@ -11,13 +11,13 @@ interface SignedThumbnails {
   expiresAt: number;
 }
 
-// Une signature groupée par tranche de vingt, jamais dans chaque carte. Les URL
+// Une signature groupée pour les chemins manquants, jamais dans chaque carte. Les URL
 // sont éphémères, en mémoire seulement et inutilisables dans un nouveau scope.
 export function useDocumentThumbnails(documents: readonly DocumentItem[]) {
   const { user } = useAuth();
   const { generation } = useSyncExternalStore(subscribeSupabaseClient, getSupabaseClientState, getSupabaseClientState);
   const scope = `${generation}:${user?.id || ''}`;
-  const pathsKey = JSON.stringify([...new Set(documents.flatMap((item) => item.thumbnail_path ? [item.thumbnail_path] : []))].sort());
+  const pathsKey = JSON.stringify([...new Set(documents.flatMap((item) => item.deleted_at === null && item.thumbnail_path ? [item.thumbnail_path] : []))].sort());
   const [signed, setSigned] = useState<SignedThumbnails | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [failure, setFailure] = useState<{ scope: string; message: string } | null>(null);
@@ -67,7 +67,7 @@ export function useDocumentThumbnails(documents: readonly DocumentItem[]) {
         if (isCurrent()) {
           cache.current = null;
           setSigned(null);
-          setFailure({ scope, message: errorMessage(cause, 'Aperçus indisponibles. Réessayez.') });
+          setFailure({ scope, message: userError(cause, 'Aperçus indisponibles. Réessayez.') });
         }
       } finally { if (isCurrent()) setPending(null); }
     };
@@ -76,7 +76,7 @@ export function useDocumentThumbnails(documents: readonly DocumentItem[]) {
   }, [scope, generation, user?.id, pathsKey, revision]);
   const valid = signed?.scope === scope && signed.expiresAt > Date.now();
   return {
-    urls: valid ? signed.urls : {},
+    urls: valid ? Object.fromEntries(Object.entries(signed.urls).filter(([path]) => (JSON.parse(pathsKey) as string[]).includes(path))) : {},
     loading: pending === scope,
     error: failure?.scope === scope ? failure.message : null,
     retry: () => { cache.current = null; setRevision((value) => value + 1); },

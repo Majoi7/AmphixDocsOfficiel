@@ -132,6 +132,86 @@ export async function getDocumentThumbnailUrls(paths: readonly string[], actorId
 }
 export async function getDocumentSignedUrl() { return '/fixture-file.pdf'; }
 
+// Les octets et le décodage sont fictifs : ce banc vérifie les composants et
+// leurs cycles de vie, pas pdf.js, les droits Storage ou le contenu d'un PDF.
+export const sourceCalls: { id: string; aborted: boolean }[] = [];
+export const completionCalls: { id: string; sameSource: boolean; aborted: boolean }[] = [];
+const originalBlobs = new Map<string, Blob>();
+let sourceFailure = false;
+let completionFailure = false;
+let decoderFailure = false;
+const pdfStats = { opened: 0, disposed: 0, rendered: [] as number[], active: 0, maxActive: 0 };
+const fixtureImage = '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="320"><rect width="240" height="320" fill="#f1ece4"/><text x="20" y="80">IMAGE FICTIVE</text></svg>';
+export async function getDocumentPreviewSource(expected: DocumentItem, actorId: string, signal?: AbortSignal): Promise<Blob> {
+  if (actorId !== user?.id || !visible(expected, actorId)) throw new Error('Source fictive inaccessible.');
+  const call = { id: expected.id, aborted: !!signal?.aborted };
+  sourceCalls.push(call);
+  signal?.addEventListener('abort', () => { call.aborted = true; }, { once: true });
+  const blob = new Blob([expected.file_type === 'image' ? fixtureImage : 'SOURCE FICTIVE, PAS UN PDF'], {
+    type: expected.file_type === 'image' ? 'image/svg+xml' : 'application/pdf',
+  });
+  originalBlobs.set(expected.id, blob);
+  // Ignorer volontairement l'annulation après cette attente pour éprouver le
+  // filtrage des réponses tardives du composant, indépendamment du helper réel.
+  await gates.get('preview-source')?.promise;
+  if (sourceFailure) throw new Error('STORAGE_SECRET_SHOULD_NEVER_RENDER');
+  return blob;
+}
+export async function completeDocumentPreview(expected: DocumentItem, actorId: string, source?: Blob, signal?: AbortSignal): Promise<DocumentItem> {
+  if (actorId !== user?.id || expected.user_id !== actorId || expected.deleted_at !== null) throw new Error('Complétion fictive interdite.');
+  const call = { id: expected.id, sameSource: source === originalBlobs.get(expected.id), aborted: !!signal?.aborted };
+  completionCalls.push(call);
+  signal?.addEventListener('abort', () => { call.aborted = true; }, { once: true });
+  const confirmed = { ...clone(expected), thumbnail_path: expected.thumbnail_path || `${actorId}/${expected.id}/${'a'.repeat(64)}.jpg`, page_count: expected.page_count ?? (expected.file_type === 'pdf' ? 8 : 1) };
+  await gates.get('preview-complete')?.promise;
+  if (completionFailure) throw new Error('RPC_SECRET_SHOULD_NEVER_RENDER');
+  if (!signal?.aborted && actorId === user?.id) {
+    const current = documents.get(expected.id);
+    if (current?.deleted_at === null) documents.set(expected.id, { ...current, thumbnail_path: confirmed.thumbnail_path, page_count: confirmed.page_count });
+  }
+  return confirmed;
+}
+export async function openFixturePdf(_source: Blob, signal?: AbortSignal) {
+  if (decoderFailure) throw new Error('DECODER_SECRET_SHOULD_NEVER_RENDER');
+  if (signal?.aborted) throw new DOMException('Annulé', 'AbortError');
+  pdfStats.opened++;
+  let disposed = false;
+  const dispose = async () => {
+    if (!disposed) { disposed = true; pdfStats.disposed++; }
+    signal?.removeEventListener('abort', abort);
+  };
+  const abort = () => { void dispose(); };
+  signal?.addEventListener('abort', abort, { once: true });
+  return {
+    dispose,
+    document: {
+      numPages: 8,
+      getPage: async (number: number) => {
+        if (disposed || number < 1 || number > 8) throw new Error('Page fictive indisponible.');
+        return {
+          getViewport: ({ scale }: { scale: number }) => ({ width: 600 * scale, height: 800 * scale }),
+          cleanup: () => undefined,
+          render: ({ canvasContext, viewport }: { canvasContext: CanvasRenderingContext2D; viewport: { width: number; height: number } }) => {
+            let cancelled = false;
+            pdfStats.active++;
+            pdfStats.maxActive = Math.max(pdfStats.maxActive, pdfStats.active);
+            const promise = Promise.resolve().then(() => {
+              if (cancelled || disposed) throw new DOMException('Annulé', 'AbortError');
+              canvasContext.fillStyle = '#ffffff';
+              canvasContext.fillRect(0, 0, viewport.width, viewport.height);
+              canvasContext.fillStyle = '#141414';
+              canvasContext.font = '20px sans-serif';
+              canvasContext.fillText(`PAGE FICTIVE ${number}`, 20, 60);
+              pdfStats.rendered.push(number);
+            }).finally(() => { pdfStats.active--; });
+            return { promise, cancel: () => { cancelled = true; } };
+          },
+        };
+      },
+    },
+  };
+}
+
 type Action = 'plan' | 'search' | 'rank';
 type Mode = 'normal' | 'empty' | 'fallback' | 'out-of-scope' | 'rank-fallback';
 type Gate = { promise: Promise<void>; release: () => void };
@@ -222,6 +302,15 @@ export const fixtureApi = {
   calls: () => clone(leoCalls),
   libraryCalls: () => clone(libraryCalls), targets: () => clone(targetCalls), thumbnails: () => clone(thumbnailCalls),
   mutations: () => clone(mutationCalls), document: (id: string) => clone(documents.get(id)),
+  sources: () => clone(sourceCalls), completions: () => clone(completionCalls), pdf: () => clone(pdfStats),
+  patchDocument: (id: string, fields: Partial<Pick<DocumentItem, 'thumbnail_path' | 'page_count' | 'file_type' | 'file_name' | 'deleted_at'>>) => {
+    const document = documents.get(id);
+    if (!document) throw new Error('Document fictif absent.');
+    documents.set(id, { ...document, ...fields });
+  },
+  failSource: (fail: boolean) => { sourceFailure = fail; },
+  failCompletion: (fail: boolean) => { completionFailure = fail; },
+  failDecoder: (fail: boolean) => { decoderFailure = fail; },
   networkAttempts: () => forbiddenCalls,
   hold, release, mode: (next: Mode) => { mode = next; },
   fail: (action: Action, status = 503) => { nextFailure = { action, status }; },

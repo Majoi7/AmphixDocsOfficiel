@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, before, test } from 'node:test';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { access, mkdtemp, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -13,7 +14,8 @@ import tailwindcss from '@tailwindcss/vite';
 
 // Recette locale, sans installation ni .env : vrais composants, hooks, transport
 // et navigation ; frontières Auth/HTTP/SQL/signatures explicitement fictives.
-// Le serveur ne sert que son build en mémoire et deux ressources fictives.
+// Le serveur ne sert que son build en mémoire, deux ressources fictives et
+// une page de bootstrap sans scripts pour sonder CDP avant l'application.
 // CSP et CDP interdisent tout réseau externe AVANT le montage de l'application.
 // Aucun profil navigateur existant n'est ouvert ; le profil créé est conservé.
 const root = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -21,6 +23,8 @@ const fixturePath = normalizePath(path.join(root, 'scripts/browser/leo-mocks.tsx
 const sourcePath = normalizePath(path.join(root, 'src/lib/supabase.ts'));
 const configPath = normalizePath(path.join(root, 'src/lib/supabase-config'));
 const authPath = normalizePath(path.join(root, 'src/context/AuthContext'));
+const pdfRuntimePath = normalizePath(path.join(root, 'src/lib/pdf-runtime'));
+const decoderId = '\0amphixdocs-preview-decoder-fixture';
 const facadeId = '\0amphixdocs-leo-test-boundaries';
 const project = 'https://leo-browser.invalid';
 const id = (n) => `${String(n).padStart(8, '0')}-aaaa-4aaa-8aaa-aaaaaaaaaaaa`;
@@ -30,7 +34,7 @@ const resultCards = '.leo-results button[aria-haspopup="dialog"]';
 const steps = '.leo-panel [data-status]';
 const blockedRequests = [], remoteResponses = [], protocolErrors = [], runtimeErrors = [];
 let server, origin, browser, cdp, session, profile;
-let intentionalNetworkProbe = false;
+let pendingNetworkProbe = null;
 let previousRuntimeErrors = 0;
 
 function isolatedImports() {
@@ -43,14 +47,18 @@ function isolatedImports() {
       const parent = normalizePath(importer.split('?')[0]);
       const resolved = normalizePath(path.resolve(path.dirname(parent), source)).replace(/\.(?:tsx?|jsx?)$/, '');
       if (resolved === configPath || resolved === authPath) return fixturePath;
+      if (resolved === pdfRuntimePath) return decoderId;
       if (resolved === sourcePath.replace(/\.ts$/, '')) { replacements++; return facadeId; }
     },
     load(moduleId) {
+      // Frontière de décodage simulée UNIQUEMENT dans ce banc : le lecteur et
+      // son import restent réels. Cela ne valide ni pdf.js ni le build livré.
+      if (moduleId === decoderId) return `export { openFixturePdf as openPdf } from ${JSON.stringify(fixturePath)};`;
       if (moduleId !== facadeId) return;
       // Les exports explicites priment sur export *. Les helpers purs de
       // production restent réels, mais aucune lecture/mutation n'est distante.
       return `export * from ${JSON.stringify(sourcePath)};
-export { fetchDashboardData, fetchDocumentTargets, getDocumentThumbnailUrls, getDocumentSignedUrl, updateDocumentMetadata, setDocumentTrash } from ${JSON.stringify(fixturePath)};
+export { fetchDashboardData, fetchDocumentTargets, getDocumentThumbnailUrls, getDocumentSignedUrl, getDocumentPreviewSource, completeDocumentPreview, updateDocumentMetadata, setDocumentTrash } from ${JSON.stringify(fixturePath)};
 export async function resumeUserDocument() { throw new Error('Le dépôt est hors périmètre de la recette Léo.'); }`;
     },
     generateBundle() {
@@ -62,11 +70,13 @@ export async function resumeUserDocument() { throw new Error('Le dépôt est hor
         'src/hooks/useDocumentThumbnails.ts', 'src/hooks/useDocumentLink.ts', 'src/components/LeoPanel.tsx',
         'src/components/LeoLauncher.tsx', 'src/components/DocumentGrid.tsx', 'src/components/FileCard.tsx',
         'src/components/DocumentDetails.tsx', 'src/components/DocumentPreview.tsx',
+        'src/components/DocumentFileViewer.tsx', 'src/components/PdfDocumentViewer.tsx', 'src/components/ImageDocumentViewer.tsx',
         'src/components/ui/ai-input-with-loading.tsx', 'src/components/ui/chain-of-thought.tsx',
         'src/components/UploadModal.tsx', 'src/lib/supabase.ts',
       ]) assert.ok(modules.has(normalizePath(path.join(root, relative))), `Le module réel manque : ${relative}`);
       assert.ok(!modules.has(`${configPath}.ts`), 'La configuration réelle ne doit jamais entrer dans le banc.');
       assert.ok(!modules.has(`${authPath}.tsx`), 'Aucune session réelle ne doit entrer dans le banc.');
+      assert.ok(!modules.has(`${pdfRuntimePath}.ts`), 'Le décodage PDF doit rester explicitement simulé dans ce banc.');
       assert.ok(![...modules].some((name) => name.includes('/functions/leo-search/')), 'Le serveur Gemini ne doit jamais entrer dans le navigateur.');
     },
   };
@@ -133,7 +143,7 @@ async function waitUntil(predicate, description, timeout = 8000) {
   while (Date.now() < deadline) { if (await predicate()) return; await pause(25); }
   throw new Error(`Attente dépassée : ${description}.`);
 }
-const waitFor = (expression, description) => waitUntil(() => evaluate(expression), description);
+const waitFor = (expression, description) => waitUntil(() => evaluate(`Boolean(${expression})`), description);
 function eventOnce(method) {
   return new Promise((resolve, reject) => {
     const listener = (event) => {
@@ -191,7 +201,7 @@ async function fresh(width = 360, url = '/dashboard') {
   assert.equal(await evaluate('location.origin'), origin);
 }
 async function open() {
-  await evaluate(`window.__leoLauncher = ${element(launcher)}`);
+  await evaluate(`window.__leoLauncher = ${element(launcher)}; void 0;`);
   await click(launcher);
   await waitFor('!!document.querySelector(".leo-panel") && document.activeElement === document.querySelector(".leo-panel textarea")', 'panneau et focus initial');
 }
@@ -216,6 +226,18 @@ async function details(documentId = id(21), useCard = false) {
 async function backToLeo() {
   await click('[role="dialog"] button[aria-label="Fermer"]');
   await waitFor('!!document.querySelector(".leo-panel")', 'retour vers Léo');
+}
+const pdfRegion = '[role="region"][aria-label="Pages du document PDF"]';
+const previewMessage = 'Impossible d’afficher l’aperçu. Tu peux télécharger le fichier.';
+async function renderedPdf(page = 1) {
+  await waitFor(`document.querySelector('[data-pdf-page="${page}"] canvas')?.width > 0`, `canvas de la page ${page}`);
+  await waitUntil(async () => (await api('pdf')).rendered.includes(page), `rendu fictif de la page ${page}`);
+}
+async function lastPdfPage() {
+  await evaluate(`(() => { const region = document.querySelector(${JSON.stringify(pdfRegion)});
+    region.scrollTop = region.scrollHeight; region.dispatchEvent(new Event('scroll')); })()`);
+  await renderedPdf(8);
+  await waitFor('!document.querySelector(\'[data-pdf-page="1"] canvas\')', 'libération du canvas éloigné');
 }
 async function screenshotFailure(name) {
   if (!cdp || !session || !profile) return;
@@ -248,6 +270,14 @@ before(async () => {
     response.setHeader('Content-Security-Policy', csp);
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('X-Content-Type-Options', 'nosniff');
+    if (pathname === '/__cdp_bootstrap__') {
+      // La CSP applicative n'est pas desserrée. Cette page n'a aucun script ;
+      // seule la sonde contrôlée par CDP peut utiliser connect-src 'self'.
+      response.setHeader('Content-Security-Policy', "default-src 'none'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
+      response.setHeader('Content-Type', 'text/html; charset=utf-8');
+      response.end('<!doctype html><html lang="fr"><meta charset="utf-8"><title>Sonde locale CDP</title><body>Sonde locale, sans application.</body></html>');
+      return;
+    }
     if (!files.has(file)) { response.writeHead(404); response.end('Ressource absente du banc local.'); return; }
     response.setHeader('Content-Type', types[path.extname(file)] || 'application/octet-stream');
     response.end(files.get(file));
@@ -280,11 +310,23 @@ before(async () => {
     if (event.sessionId !== session) return;
     if (event.method === 'Fetch.requestPaused') {
       const url = event.params.request.url;
-      if (url.startsWith(`${origin}/`)) await send('Fetch.continueRequest', { requestId: event.params.requestId });
+      const probe = pendingNetworkProbe;
+      const probeRequest = probe?.url === url;
+      if (url.startsWith(`${origin}/`) && !probeRequest) await send('Fetch.continueRequest', { requestId: event.params.requestId });
       else {
-        blockedRequests.push({ url, intentional: intentionalNetworkProbe });
+        if (probeRequest) probe.observed = { method: event.params.request.method, resourceType: event.params.resourceType };
+        const intentional = !!probe && probe.url === url && probe.requestId === null
+          && event.params.request.method === 'GET' && event.params.resourceType === 'Fetch';
+        if (intentional) probe.requestId = event.params.requestId;
+        blockedRequests.push({ url, intentional });
         await send('Fetch.failRequest', { requestId: event.params.requestId, errorReason: 'BlockedByClient' });
+        if (intentional) probe.blocked = true;
       }
+    }
+    const probe = pendingNetworkProbe;
+    if (probe && event.method === 'Network.requestWillBeSent' && event.params.request.url === probe.url) probe.networkId = event.params.requestId;
+    if (probe && event.method === 'Network.loadingFailed' && event.params.requestId === probe.networkId) {
+      probe.failure = { errorText: event.params.errorText, blockedReason: event.params.blockedReason, corsErrorStatus: event.params.corsErrorStatus };
     }
     if (event.method === 'Network.responseReceived' && /^https?:/.test(event.params.response.url)
       && !event.params.response.url.startsWith(`${origin}/`)) remoteResponses.push(event.params.response.url);
@@ -294,7 +336,7 @@ before(async () => {
   await send('Network.enable'); await send('Runtime.enable'); await send('Page.enable');
   await send('Page.addScriptToEvaluateOnNewDocument', { source: `window.__leoCsp = []; document.addEventListener('securitypolicyviolation', (event) => window.__leoCsp.push(event.effectiveDirective));` });
   await send('Emulation.setEmulatedMedia', { media: 'screen', features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
-  console.info('Banc Léo : vrais React, navigation et transport ; Auth, HTTP, SQL et signatures fictifs. Aucun test RLS/OAuth distant.');
+  console.info('Banc Léo/aperçus : vrais React, navigation et transport ; Auth, HTTP, SQL, signatures et décodage PDF fictifs. Aucun test pdf.js/RLS/OAuth distant.');
   console.info(`Profil isolé conservé : ${profile}`);
 }, { timeout: 120000 });
 
@@ -314,13 +356,26 @@ after(async () => {
 });
 
 test('CDP et CSP bloquent le réseau avant tout appel réel', async () => {
-  intentionalNetworkProbe = true;
+  // Sonder le fetch natif depuis une page locale sans application. La requête
+  // reste locale même si CDP régresse ; son interception explicite est requise.
+  const probe = { url: `${origin}/__cdp_probe__/${randomUUID()}`, requestId: null, blocked: false };
+  const loaded = eventOnce('Page.loadEventFired');
+  await send('Page.navigate', { url: `${origin}/__cdp_bootstrap__` }); await loaded;
+  assert.equal(await evaluate('location.href'), `${origin}/__cdp_bootstrap__`);
+  assert.equal(await evaluate('!!window.__leoTest'), false);
+  const before = blockedRequests.length;
+  pendingNetworkProbe = probe;
   try {
-    const before = blockedRequests.length;
-    const navigation = await send('Page.navigate', { url: `${project}/rest/v1/documents` });
-    assert.match(navigation.errorText || '', /ERR_BLOCKED_BY_CLIENT/);
-    assert.equal(blockedRequests.length, before + 1);
-  } finally { intentionalNetworkProbe = false; }
+    const result = await evaluate(`fetch(${JSON.stringify(probe.url)}, {
+      mode: 'no-cors', cache: 'no-store', credentials: 'omit', redirect: 'error'
+    }).then(() => 'autorisé', () => 'refusé')`);
+    assert.equal(result, 'refusé');
+    await waitUntil(() => probe.blocked, 'refus explicite de la sonde par CDP').catch((cause) => {
+      throw new Error(`${cause.message} Événement observé : ${JSON.stringify(probe.observed ?? null)} ; échec : ${JSON.stringify(probe.failure ?? null)} ; requêtes : ${JSON.stringify(blockedRequests.slice(before))}`, { cause });
+    });
+    assert.ok(probe.requestId);
+    assert.deepEqual(blockedRequests.slice(before), [{ url: probe.url, intentional: true }]);
+  } finally { pendingNetworkProbe = null; }
   await fresh();
   assert.equal(await api('probeCsp'), 'refusé');
   await waitFor('window.__leoCsp.includes("connect-src")', 'preuve du blocage CSP du fetch natif');
@@ -421,6 +476,9 @@ test('trois étapes réelles, suggestions, 30 liens internes, dix cartes et aper
   assert.ok(links.every(link => /^\/dashboard\?document=[0-9a-f-]{36}$/.test(link.url) && !link.target));
   await api('release', 'rank'); await completed();
   assert.deepEqual(await stepStates(), ['complete', 'complete', 'complete']);
+  const headerText = await evaluate(`Array.from(document.querySelectorAll('.leo-panel button')).find(button => button.textContent.includes('Réflexion de Léo'))?.textContent`);
+  assert.equal(headerText, 'Réflexion de Léo3/3 étapes');
+  assert.doesNotMatch(headerText, /3\/33|terminées sur/);
   assert.match(await panelText(), /10 résultats trouvés/);
   assert.equal(await evaluate('document.querySelectorAll(".leo-panel h4 + ul li").length'), 3);
   await evaluate('document.querySelector(".leo-results").scrollIntoView({ block: "start", behavior: "instant" })');
@@ -437,8 +495,18 @@ test('détail hors pagination, téléchargement préparé, retour et historique 
   assert.ok((await api('libraryCalls')).every(call => !call.ids.includes(id(21))));
   await details();
   assert.ok((await api('targets')).some(ids => ids.includes(id(21))));
-  await clickText('Préparer le téléchargement', '[role="dialog"]');
-  await waitFor('!!document.querySelector("[role=dialog] a[download]")', 'signature fictive préparée');
+  await evaluate(`window.__downloadClickEvents = [];
+    for (const type of ['pointerdown', 'pointerup', 'click']) document.addEventListener(type, event => {
+      const target = event.target instanceof Element ? event.target : null;
+      window.__downloadClickEvents.push({ type, tag: target?.tagName, button: target?.closest('button, a')?.textContent.trim(), x: event.clientX, y: event.clientY });
+    }, true); void 0;`);
+  await clickText('Télécharger', '[role="dialog"]');
+  await waitFor('!!document.querySelector("[role=dialog] a[download]")', 'signature fictive préparée').catch(async (cause) => {
+    const state = await evaluate(`({ events: window.__downloadClickEvents,
+      text: document.querySelector('[role=dialog]')?.textContent,
+      controls: [...document.querySelectorAll('[role=dialog] button, [role=dialog] a')].map(element => ({ text: element.textContent.trim(), disabled: element.disabled, rect: element.getBoundingClientRect().toJSON() })) })`);
+    throw new Error(`${cause.message} État local : ${JSON.stringify(state)}`, { cause });
+  });
   assert.equal(await evaluate('document.querySelector("[role=dialog] a[download]").getAttribute("href")'), '/fixture-file.pdf');
   await backToLeo(); await completed(); assert.equal(await evaluate('location.href'), url);
   assert.equal((await api('calls')).length, 3);
@@ -549,7 +617,8 @@ test('modification et corbeille hors pagination : aucune mutation optimiste, con
   assert.equal((await api('mutations'))[0].confirmed, false);
   await key('Escape'); assert.equal(await evaluate('!!document.querySelector("[role=dialog] form")'), true);
   await api('release', 'update');
-  await waitFor('document.querySelector("[role=dialog]").textContent.includes("Confirmation fictive refusée")', 'échec de confirmation affiché');
+  await waitFor('document.querySelector("[role=dialog] [role=alert]")?.textContent === "Les modifications n’ont pas pu être confirmées. Réessayez."', 'échec de confirmation affiché');
+  assert.doesNotMatch(await evaluate('document.querySelector("[role=dialog]").textContent'), /Confirmation fictive refusée/);
   assert.equal((await api('document', id(21))).title, 'Sujet d’algèbre fictif 21');
   await click('[role="dialog"] button[type="submit"]');
   await waitFor('document.querySelector("[role=dialog]").textContent.includes("Modifications enregistrées.")', 'modification confirmée');
@@ -563,7 +632,8 @@ test('modification et corbeille hors pagination : aucune mutation optimiste, con
   await waitUntil(async () => (await api('mutations')).length === 3, 'corbeille en attente');
   assert.equal((await api('document', id(21))).deleted_at, null);
   await api('release', 'trash');
-  await waitFor('document.querySelector("[role=dialog]").textContent.includes("Confirmation fictive refusée")', 'échec corbeille affiché');
+  await waitFor('document.querySelector("[role=dialog] [role=alert]")?.textContent === "L’action n’a pas pu être confirmée. Réessayez."', 'échec corbeille affiché');
+  assert.doesNotMatch(await evaluate('document.querySelector("[role=dialog]").textContent'), /Confirmation fictive refusée/);
   await backToLeo(); await completed();
   assert.ok(await evaluate(`!!document.querySelector('.leo-panel a[href="/dashboard?document=${id(21)}"]')`));
   await details(); await api('hold', 'trash'); await clickText('Placer dans la corbeille', '[role="dialog"]');
@@ -574,4 +644,229 @@ test('modification et corbeille hors pagination : aucune mutation optimiste, con
   assert.notEqual((await api('document', id(21))).deleted_at, null);
   assert.equal(await evaluate(`!!document.querySelector('.leo-panel a[href="/dashboard?document=${id(21)}"]')`), false);
   assert.equal((await api('calls')).length, 3);
+});
+
+test('lecteur PDF réel, décodage fictif : rendu proche, libération et confirmation propriétaire', async () => {
+  await fresh(320);
+  await api('patchDocument', id(21), { thumbnail_path: null, page_count: null });
+  await api('hold', 'preview-complete');
+  await open(); await submit(); await completed(); await details(); await renderedPdf();
+  await waitUntil(async () => (await api('completions')).length === 1, 'complétion propriétaire en attente');
+  assert.equal((await api('sources')).length, 1);
+  assert.equal((await api('completions'))[0].sameSource, true, 'Le lecteur et la génération partagent le Blob original.');
+  assert.equal((await api('document', id(21))).thumbnail_path, null, 'Aucune miniature optimiste.');
+  assert.equal((await api('document', id(21))).page_count, null);
+  const initial = await evaluate(`(() => {
+    const region = document.querySelector(${JSON.stringify(pdfRegion)});
+    const canvases = [...region.querySelectorAll('canvas')];
+    window.__firstPdfCanvas = region.querySelector('[data-pdf-page="1"] canvas');
+    return { pages: region.querySelectorAll('[data-pdf-page]').length, canvases: canvases.length,
+      pixels: canvases.map(canvas => canvas.width * canvas.height), width: document.documentElement.scrollWidth,
+      frames: document.querySelectorAll('iframe, object, embed').length };
+  })()`);
+  assert.equal(initial.pages, 8);
+  assert.ok(initial.canvases >= 1 && initial.canvases <= 3);
+  assert.ok(initial.pixels.every(pixels => pixels > 0 && pixels <= 2_000_000));
+  assert.ok(initial.width <= 320);
+  assert.equal(initial.frames, 0);
+  await lastPdfPage();
+  await waitFor('window.__firstPdfCanvas.width === 0 && window.__firstPdfCanvas.height === 0', 'pixels du canvas détaché libérés');
+  assert.ok(await evaluate(`document.querySelector(${JSON.stringify(pdfRegion)}).querySelectorAll('canvas').length <= 3`));
+  assert.match(await evaluate('document.querySelector("[role=dialog]").textContent'), /Page [78] \/ 8/);
+  const stats = await api('pdf');
+  assert.ok(stats.maxActive >= 1 && stats.maxActive <= 2);
+  assert.ok(new Set(stats.rendered).size < 8, 'Le lecteur ne doit pas rendre les huit pages à l’ouverture.');
+  await api('release', 'preview-complete');
+  await waitUntil(async () => (await api('document', id(21))).page_count === 8, 'colonnes confirmées par la frontière fictive');
+  await api('settle'); await backToLeo(); await completed();
+  await waitFor('document.querySelector(".leo-results").textContent.includes("8 pages")', 'compte propagé dans les cartes Léo');
+  assert.equal(await evaluate('document.querySelectorAll(".leo-panel h4 + ul li").length'), 3, 'La confirmation d’aperçu conserve les explications.');
+  assert.ok((await api('thumbnails')).some(paths => paths.some(value => value.endsWith('.jpg'))));
+  await waitUntil(async () => { const value = await api('pdf'); return value.disposed === value.opened && value.active === 0; }, 'document PDF et rendus libérés');
+  assert.equal((await api('calls')).length, 3, 'Aucun nouveau pipeline Léo pour confirmer l’aperçu.');
+});
+
+test('lecteur PDF : repli géométrique sans IntersectionObserver', async () => {
+  await fresh();
+  await evaluate('window.IntersectionObserver = undefined; void 0;');
+  await open(); await submit(); await completed(); await details(); await renderedPdf();
+  await lastPdfPage();
+  assert.ok(await evaluate(`document.querySelector(${JSON.stringify(pdfRegion)}).querySelectorAll('canvas').length <= 3`));
+  await backToLeo();
+  await waitUntil(async () => { const stats = await api('pdf'); return stats.disposed === stats.opened; }, 'nettoyage du repli sans observer');
+});
+
+for (const failure of ['Source', 'Decoder']) test(`lecteur : erreur ${failure} maîtrisée et réessai sans fuite technique`, async () => {
+  await fresh(); await api(`fail${failure}`, true);
+  await open(); await submit(); await completed(); await details();
+  await waitFor(`document.querySelector('[role="dialog"] [role="alert"]')?.textContent === ${JSON.stringify(previewMessage)}`, 'erreur d’aperçu publique');
+  assert.doesNotMatch(await evaluate('document.querySelector("[role=dialog]").textContent'), /SECRET|STORAGE|DECODER|pdfjs|supabase/i);
+  assert.equal((await api('sources')).length, 1);
+  await api(`fail${failure}`, false);
+  await clickText('Réessayer', '[role="dialog"]'); await renderedPdf();
+  assert.equal((await api('sources')).length, failure === 'Source' ? 2 : 1, 'Un réessai de décodage conserve le Blob téléchargé.');
+  assert.equal(await evaluate('!!document.querySelector("[role=dialog] [role=alert]")'), false);
+  await backToLeo();
+});
+
+test('complétion propriétaire en échec : le lecteur reste disponible et aucune miniature n’est inventée', async () => {
+  await fresh();
+  await api('patchDocument', id(21), { thumbnail_path: null, page_count: null });
+  await api('failCompletion', true);
+  await open(); await submit(); await completed(); await details(); await renderedPdf();
+  await waitUntil(async () => (await api('completions')).length === 1, 'essai facultatif effectué');
+  await api('settle');
+  const text = await evaluate('document.querySelector("[role=dialog]").textContent');
+  assert.match(text, /Page \d+ \/ 8/);
+  assert.doesNotMatch(text, /RPC_SECRET|Impossible d’afficher/);
+  assert.equal((await api('document', id(21))).thumbnail_path, null);
+  assert.equal((await api('document', id(21))).page_count, null);
+  assert.equal((await api('sources')).length, 1);
+  await backToLeo(); await completed();
+  assert.equal(await evaluate('document.querySelectorAll(".leo-results img").length'), 0);
+  assert.equal((await api('calls')).length, 3);
+});
+
+for (const pending of ['preview-source', 'preview-complete']) test(`fermeture du détail pendant ${pending} : réponse tardive ignorée`, async () => {
+  await fresh();
+  await api('patchDocument', id(21), { thumbnail_path: null, page_count: null });
+  await api('hold', pending);
+  await open(); await submit(); await completed(); await details();
+  const collection = pending === 'preview-source' ? 'sources' : 'completions';
+  await waitUntil(async () => (await api(collection)).length === 1, 'frontière d’aperçu suspendue');
+  if (pending === 'preview-complete') await renderedPdf();
+  await backToLeo(); await completed();
+  assert.equal((await api(collection))[0].aborted, true);
+  await api('release', pending); await api('settle');
+  assert.equal((await api('document', id(21))).thumbnail_path, null);
+  assert.equal((await api('document', id(21))).page_count, null);
+  assert.equal(await evaluate('document.querySelectorAll(".leo-results img").length'), 0);
+  assert.equal(await evaluate(`document.querySelectorAll('[data-pdf-page], section[aria-label="Aperçu du fichier"]').length`), 0);
+  assert.equal(await evaluate('[...document.querySelectorAll("[role=dialog]")].every(dialog => dialog.classList.contains("leo-panel"))'), true);
+  assert.equal((await api('completions')).length, pending === 'preview-source' ? 0 : 1);
+  const stats = await api('pdf');
+  assert.equal(stats.opened, stats.disposed); assert.equal(stats.active, 0);
+  assert.equal((await api('calls')).length, 3);
+});
+
+test('chargement différé du lecteur : rejet capturé, réessai avec le même Blob et démontage en attente', async () => {
+  await fresh(); await api('navigate', '/preview-loader');
+  await waitFor(`document.querySelector('[role="alert"]')?.textContent === ${JSON.stringify(previewMessage)}`, 'erreur du loader injecté');
+  assert.doesNotMatch(await evaluate('document.body.textContent'), /CHUNK_SECRET/);
+  const rejectedCalls = (await api('loader')).calls;
+  assert.ok(rejectedCalls > 0);
+  await api('loaderMode', 'resolve'); await clickText('Réessayer', 'body');
+  await waitFor('document.querySelector("[data-fixture-reader]")?.dataset.sameSource === "true"', 'réessai du même composant et du même Blob');
+  assert.equal((await api('loader')).calls, rejectedCalls + 1);
+  assert.equal((await api('sources')).length, 0, 'Le loader ne doit pas déclencher de téléchargement.');
+  await api('navigate', '/'); await api('loaderMode', 'hold'); await api('navigate', '/preview-loader');
+  await waitUntil(async () => (await api('loader')).calls === rejectedCalls + 2, 'import différé suspendu');
+  assert.match(await evaluate('document.body.textContent'), /Ouverture du PDF/);
+  await api('navigate', '/'); await api('releaseLoader'); await api('settle');
+  assert.equal(await evaluate('!!document.querySelector("[data-fixture-reader]")'), false);
+  assert.match(await evaluate('document.body.textContent'), /dashboard est démonté/);
+});
+
+test('image plein écran : pincement à deux doigts, clavier, focus imbriqué et nettoyage', async () => {
+  await fresh(320);
+  await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
+  await api('patchDocument', id(21), { file_type: 'image', file_name: 'fictif-21.svg', page_count: 1 });
+  await evaluate(`(() => {
+    window.__imageObjectUrls = { created: [], revoked: [] };
+    const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
+    URL.createObjectURL = (blob) => { const url = create(blob); window.__imageObjectUrls.created.push(url); return url; };
+    URL.revokeObjectURL = (url) => { window.__imageObjectUrls.revoked.push(url); revoke(url); };
+  })()`);
+  await open(); await submit(); await completed(); await details();
+  const imageButton = 'button[aria-label="Afficher l’image en plein écran"]';
+  const stage = '[role="group"][aria-label="Image agrandie, zoom avec deux doigts ou les boutons"]';
+  const fullscreenClose = 'button[aria-label="Fermer l’image en plein écran"]';
+  const transform = () => evaluate(`(() => {
+    const stage = document.querySelector(${JSON.stringify(stage)});
+    const matrix = new DOMMatrixReadOnly(getComputedStyle(stage.querySelector('img')).transform);
+    return { scale: matrix.a, x: matrix.e, y: matrix.f, width: stage.clientWidth, height: stage.clientHeight };
+  })()`);
+  await waitFor(`document.querySelector(${JSON.stringify(imageButton)})?.disabled === false`, 'image locale décodée');
+  await evaluate(`window.__imageLauncher = document.querySelector(${JSON.stringify(imageButton)}); void 0;`);
+  await click(imageButton);
+  await waitFor(`document.activeElement === document.querySelector(${JSON.stringify(fullscreenClose)})`, 'focus initial du dialogue image');
+  assert.equal(await evaluate('document.querySelectorAll("[role=dialog]").length'), 2);
+  assert.equal(await evaluate('document.body.style.overflow'), 'hidden');
+  assert.equal((await api('sources')).length, 1);
+  assert.equal((await api('pdf')).opened, 0);
+  assert.equal((await api('completions')).length, 0);
+  assert.equal((await transform()).scale, 1);
+  assert.equal(await evaluate('document.querySelector(\'button[aria-label="Dézoomer"]\').disabled'), true);
+  await evaluate('document.querySelector(\'button[aria-label="Réinitialiser le zoom"]\').focus()');
+  await key('Tab');
+  assert.equal(await evaluate(`document.activeElement === document.querySelector(${JSON.stringify(fullscreenClose)})`), true);
+  await key('Tab', 8);
+  assert.equal(await evaluate('document.activeElement === document.querySelector(\'button[aria-label="Réinitialiser le zoom"]\')'), true);
+  await evaluate('document.querySelector(\'[role="dialog"] button[aria-label="Fermer"]\').focus()');
+  assert.equal(await evaluate(`document.querySelector(${JSON.stringify(stage)}).closest('[role="dialog"]').contains(document.activeElement)`), true);
+  await api('settle');
+  const bounds = await evaluate(`(() => {
+    const region = document.querySelector(${JSON.stringify(stage)}), dialog = region.closest('[role="dialog"]');
+    const r = region.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2,
+      targets: [...dialog.querySelectorAll('button')].map(button => { const b = button.getBoundingClientRect(); return [b.width, b.height]; }),
+      animations: dialog.getAnimations({ subtree: true }).filter(animation => animation.playState === 'running').length };
+  })()`);
+  assert.ok(bounds.targets.every(([width, height]) => width >= 44 && height >= 44));
+  assert.equal(bounds.animations, 0);
+  const touches = (spread) => [
+    { id: 1, x: bounds.x - spread, y: bounds.y, radiusX: 2, radiusY: 2, force: 1 },
+    { id: 2, x: bounds.x + spread, y: bounds.y, radiusX: 2, radiusY: 2, force: 1 },
+  ];
+  // Événements tactiles CDP transmis au navigateur, pas appel direct des handlers React.
+  await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: touches(30) });
+  for (const spread of [40, 50, 60]) await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: touches(spread) });
+  await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await waitUntil(async () => (await transform()).scale >= 1.8, 'zoom par pincement réel dans le navigateur');
+  const pinched = await transform();
+  assert.ok(pinched.scale <= 4);
+  const panPoint = { id: 1, x: bounds.x, y: bounds.y, radiusX: 2, radiusY: 2, force: 1 };
+  await send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [panPoint] });
+  await send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...panPoint, x: bounds.x + 35, y: bounds.y + 20 }] });
+  await send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await waitUntil(async () => Math.abs((await transform()).x - pinched.x) > 10, 'déplacement de l’image zoomée');
+  const panned = await transform();
+  assert.ok(Math.abs(panned.x) <= panned.width * (panned.scale - 1) / 2);
+  assert.ok(Math.abs(panned.y) <= panned.height * (panned.scale - 1) / 2);
+  await click('button[aria-label="Réinitialiser le zoom"]');
+  await waitUntil(async () => (await transform()).scale === 1, 'zoom réinitialisé');
+  await evaluate(`document.querySelector(${JSON.stringify(stage)}).focus()`);
+  await key('+');
+  await waitUntil(async () => (await transform()).scale === 1.25, 'zoom au clavier');
+  await key('ArrowRight');
+  assert.ok((await transform()).x < 0);
+  await key('0');
+  await waitUntil(async () => { const value = await transform(); return value.scale === 1 && value.x === 0 && value.y === 0; }, 'remise à zéro au clavier');
+  await api('viewport', 340, 18);
+  await waitFor(`Math.abs(document.querySelector(${JSON.stringify(stage)}).closest('[role="dialog"]').getBoundingClientRect().height - 340) < 1`, 'plein écran dans le viewport visuel');
+  assert.ok(await evaluate('document.documentElement.scrollWidth <= 320'));
+  await key('Escape');
+  await waitFor(`!document.querySelector(${JSON.stringify(stage)})`, 'Échap ferme seulement le dialogue image');
+  assert.equal(await evaluate('document.querySelectorAll("[role=dialog]").length'), 1);
+  assert.equal(await evaluate('document.activeElement === window.__imageLauncher'), true);
+  assert.equal(await evaluate('document.body.style.overflow'), 'hidden');
+  assert.equal(await evaluate('window.__imageObjectUrls.revoked.length'), 0, 'L’image reste disponible dans le détail.');
+  await api('viewport', 800, 0);
+  await backToLeo(); await completed();
+  await waitFor('window.__imageObjectUrls.created.length > 0 && window.__imageObjectUrls.created.every(url => window.__imageObjectUrls.revoked.includes(url))', 'URL objet révoquée après fermeture du détail');
+  assert.equal((await api('sources')).length, 1);
+  assert.equal((await api('calls')).length, 3);
+});
+
+test('autres formats : type et téléchargement, sans lecture de l’original ni conversion', async () => {
+  await fresh();
+  await api('patchDocument', id(21), { file_type: 'doc', file_name: 'fictif-21.docx', thumbnail_path: null, page_count: null });
+  await open(); await submit(); await completed(); await details(); await api('settle');
+  assert.equal((await api('sources')).length, 0);
+  assert.equal((await api('completions')).length, 0);
+  assert.equal((await api('pdf')).opened, 0);
+  assert.equal(await evaluate('document.querySelectorAll("[role=dialog] canvas, iframe, object, embed").length'), 0);
+  await clickText('Télécharger', '[role="dialog"]');
+  await waitFor('document.querySelector("[role=dialog] a[download]")?.download === "fictif-21.docx"', 'lien de téléchargement du format non prévisualisable');
+  await backToLeo();
 });

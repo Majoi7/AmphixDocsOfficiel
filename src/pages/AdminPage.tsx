@@ -11,6 +11,7 @@ import { PendingList } from '../components/PendingList';
 import { UsersTable } from '../components/UsersTable';
 import { MobileNav } from '../components/mobile/MobileNav';
 import { useLibraryNavigation } from '../hooks/useLibraryNavigation';
+import { PreviewBackfillPanel } from '../components/PreviewBackfillPanel';
 
 type AdminTab = 'pending' | 'users';
 type LibraryController = ReturnType<typeof createAdminLibraryController>;
@@ -55,6 +56,7 @@ export function AdminPage() {
   const [activeTab, setActiveTab] = useState<AdminTab>('pending');
   const [pendingInteraction, setPendingInteraction] = useState(false);
   const [usersInteraction, setUsersInteraction] = useState(false);
+  const [previewBusy, setPreviewBusy] = useState(false);
   const [isAvatarMenuOpen, setIsAvatarMenuOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
@@ -63,7 +65,7 @@ export function AdminPage() {
   const avatarMenuRef = useRef<HTMLDivElement>(null);
   const avatarButtonRef = useRef<HTMLButtonElement>(null);
   const sectionsId = useId();
-  const interaction = pendingInteraction || usersInteraction || !!navigation.documentId || !!navigation.panel;
+  const interaction = previewBusy || pendingInteraction || usersInteraction || !!navigation.documentId || !!navigation.panel;
 
   useEffect(() => {
     if (navigation.documentId) setActiveTab('pending');
@@ -77,6 +79,7 @@ export function AdminPage() {
     libraryRef.current = library;
     setPendingInteraction(false);
     setUsersInteraction(false);
+    setPreviewBusy(false);
     setSignOutError(null);
     setIsAvatarMenuOpen(false);
     // Le contrôleur expose l'erreur. Les actions reçoivent, elles, la promesse rejetée.
@@ -182,6 +185,9 @@ export function AdminPage() {
         <h1 className="mb-5 text-2xl font-extrabold tracking-tight sm:text-4xl">Console d’administration</h1>
         {signOutError && <p role="alert" className="mb-4 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">{signOutError}</p>}
         {isLoggingOut && <p role="status" className="mb-4 text-sm">Déconnexion en cours…</p>}
+        {isAdmin && <PreviewBackfillPanel key={`${generation}:${userId}:${sortOrder}`} actorId={userId}
+          isCurrent={library.isCurrent} onBusyChange={setPreviewBusy} onComplete={refresh}
+          disabled={actionsDisabled || pendingInteraction || usersInteraction || !!navigation.documentId || !!navigation.panel} />}
         <div role="group" aria-label="Sections de la console" className="mb-5 grid grid-cols-2 gap-1 rounded-3xl bg-[#141414]/5 p-1 sm:inline-flex">
           {tabs.map((tab) => (
             <button key={tab.id} id={`${sectionsId}-${tab.id}`} type="button" aria-pressed={activeTab === tab.id}
@@ -210,11 +216,11 @@ export function AdminPage() {
             {activeTab === 'pending' ? (
               <PendingList key={`${generation}:${userId}:pending`} documents={documents} currentUserId={userId} onRefresh={library.refresh}
                 onLoadMore={library.loadMore} loading={loading} loadingMore={loadingMore} hasMore={hasMore} hasError={!!error}
-                isCurrent={library.isCurrent} disabled={actionsDisabled} onInteractionChange={setPendingInteraction}
+                isCurrent={library.isCurrent} disabled={actionsDisabled || previewBusy} onInteractionChange={setPendingInteraction}
                 sortOrder={sortOrder} onSortChange={setSortOrder} />
             ) : (
               <UsersTable key={`${generation}:${userId}:users`} users={users} currentUserId={userId} onRefresh={library.refresh}
-                isCurrent={library.isCurrent} disabled={actionsDisabled} onInteractionChange={setUsersInteraction} />
+                isCurrent={library.isCurrent} disabled={actionsDisabled || previewBusy} onInteractionChange={setUsersInteraction} />
             )}
           </section>
         )}

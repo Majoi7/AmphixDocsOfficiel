@@ -127,6 +127,52 @@ test('Gemini indisponible au plan : vraie recherche SQL, pas de classement simul
   assert.equal(r.value.message, contract.LEO_MESSAGES.unavailable); assert.equal(r.value.explanations.length, 0);
   assert.ok(f.calls.includes('sql_search')); assert.equal(f.generated.length, 1); assert.ok(!JSON.stringify(r).includes('secret technique'));
 });
+test('secours : lettres de langage conservées en expressions facultatives, mots-outils écartés', () => {
+  for (const [query, expected] of [
+    ['Je cherche le cours de langage C', ['cours', 'langage c']],
+    ['langage c', ['langage c']],
+    ['Language R', ['language r']],
+    ['cours de maths ifri', ['cours', 'maths', 'ifri']],
+    ['Algèbre', ['algebre']],
+    ['C R le de à', []],
+    ['cours C R', ['cours']],
+    ['langage C langage C', ['langage c']],
+    ['langage de C', ['langage']],
+  ]) {
+    const result = planning.fallbackPlan(query);
+    assert.deepEqual(result.keywords, expected, query);
+    assert.equal(contract.isLeoPlan(result), true);
+    assert.equal(result.subject, null);
+  }
+  const bounded = planning.fallbackPlan(`${'mot '.repeat(3)}${'x'.repeat(100)} alpha beta gamma delta epsilon zeta eta theta langage C`);
+  assert.equal(bounded.keywords.length, 8);
+  assert.ok(bounded.keywords.every(word => word.length <= 60));
+  assert.match(planning.PLAN_INSTRUCTION, /au moins un mot suffit/);
+  assert.match(planning.PLAN_INSTRUCTION, /bonus facultatif/);
+  assert.doesNotMatch(planning.PLAN_INSTRUCTION, /conjonctive/);
+});
+test('secours langage C : plan transmis intact et ordre RPC préservé malgré des relectures inversées', async () => {
+  const query = 'Je cherche le cours de langage C';
+  const docs = [
+    document(1, { title: 'Cours Complet Language C' }),
+    document(2, { title: 'coursROifri_2026', subject_name: 'Mathématiques' }),
+  ];
+  let searchedPlan;
+  // La correspondance SQL est exercée séparément par test-leo-postgres.mjs.
+  const f = fixture({ documents: docs, onSearch: value => { searchedPlan = value; },
+    read: () => [...docs].reverse(), generate: async () => { throw new Error('modèle indisponible'); } });
+  const p = await f.send({ action: 'plan', prompt: query });
+  assert.equal(p.status, 200); assert.equal(p.value.fallback, true);
+  assert.deepEqual(p.value.plan.keywords, ['cours', 'langage c']);
+  const body = { prompt: query, requestId: p.value.requestId, plan: p.value.plan, fallback: p.value.fallback };
+  const s = await f.send({ ...body, action: 'search' });
+  assert.equal(s.status, 200); assert.deepEqual(searchedPlan, p.value.plan);
+  const r = await f.send({ ...body, action: 'rank' });
+  assert.equal(r.status, 200); assert.equal(r.value.fallback, true);
+  assert.deepEqual(r.value.documents.map(d => d.title), docs.map(d => d.title));
+  assert.deepEqual(r.value.explanations, []); assert.equal(f.generated.length, 1);
+});
+
 test('refus indépendant des documents tiers pending, rejected et corbeille', async () => {
   const f = fixture({ documents: [document(1), document(2, { user_id: other, status: 'pending' }), document(3, { user_id: other, status: 'rejected' }), document(4, { deleted_at: '2026-01-01' }), document(5, { status: 'pending' }), document(6, { status: 'rejected' })] });
   const { s, r } = await f.run();

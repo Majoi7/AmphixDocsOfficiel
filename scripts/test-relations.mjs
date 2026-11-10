@@ -184,6 +184,15 @@ async function simulatedFetch(input, init = {}) {
   if (url.pathname === '/rest/v1/rpc/list_library_documents' && method === 'POST') {
     return respondToLibrary(body, url);
   }
+  if (url.pathname === '/storage/v1/object/sign/document-thumbnails' && method === 'POST') {
+    assert.equal(init.cache, 'no-store');
+    assert.deepEqual(Object.keys(body).sort(), ['expiresIn', 'paths']);
+    assert.equal(body.expiresIn, 120);
+    assert.ok(Array.isArray(body.paths));
+    if (failures.thumbnailSign) return jsonResponse(failures.thumbnailSign.data, failures.thumbnailSign.status ?? 200);
+    failures.afterThumbnailSign?.();
+    return jsonResponse(body.paths.map((path) => ({ path, error: null, signedURL: `/object/sign/document-thumbnails/${path}?token=TEST_ONLY` })));
+  }
   const table = url.pathname === '/rest/v1/documents' ? 'documents' : null;
   if (table) {
     if (method === 'GET') return respondToLookup(table, url);
@@ -287,6 +296,49 @@ after(async () => {
       }
     }
   }
+});
+
+test('les miniatures dédupliquées partent en une signature groupée courte, sans cache', async () => {
+  const paths = Array.from({ length: 25 }, (_, index) => `${userId}/document-${index}/aperçu.jpg`);
+  const result = await library.getDocumentThumbnailUrls([...paths, paths[0], paths[24]], userId);
+  const calls = requestsFor('POST', '/storage/v1/object/sign/document-thumbnails');
+  assert.equal(calls.length, 1, 'Pas de découpage par vingt ni de requête par carte.');
+  assert.deepEqual(calls[0].body, { expiresIn: 120, paths });
+  assert.equal(calls[0].cache, 'no-store');
+  assert.deepEqual(Object.keys(result), paths);
+  for (const url of Object.values(result)) assert.equal(new URL(url).origin, origin);
+  assertNoCleanup();
+});
+
+test('une liste vide de miniatures ne consulte ni Auth ni Storage', async () => {
+  assert.deepEqual(await library.getDocumentThumbnailUrls([], userId), {});
+  assert.equal(requests.length, 0);
+});
+
+test('les refus individuels et les chemins non demandés ne produisent aucun lien', async () => {
+  failures.thumbnailSign = { data: [
+    { path: 'ok.jpg', error: null, signedURL: '/object/sign/document-thumbnails/ok.jpg?token=TEST_ONLY' },
+    { path: 'refus.jpg', error: 'Accès refusé', signedURL: null },
+    { path: 'hors-selection.jpg', error: null, signedURL: '/object/sign/document-thumbnails/hors-selection.jpg?token=TEST_ONLY' },
+  ] };
+  const result = await library.getDocumentThumbnailUrls(['ok.jpg', 'refus.jpg'], userId);
+  assert.deepEqual(Object.keys(result), ['ok.jpg']);
+  assert.equal(requestsFor('POST', '/storage/v1/object/sign/document-thumbnails').length, 1);
+});
+
+test('un échec de signature groupée reste une erreur et un compte incompatible ne signe rien', async () => {
+  failures.thumbnailSign = { status: 503, data: { message: 'Panne fictive du stockage', statusCode: '503' } };
+  await assert.rejects(() => library.getDocumentThumbnailUrls(['test.jpg'], userId));
+  resetFixtures();
+  verifiedUser = { ...user, id: '22222222-2222-4222-8222-222222222222' };
+  await assert.rejects(() => library.getDocumentThumbnailUrls(['test.jpg'], userId), library.UploadScopeError);
+  assert.equal(requestsFor('POST', '/storage/v1/object/sign/document-thumbnails').length, 0);
+});
+
+test('une signature répondue après déconnexion ne quitte pas son ancien scope', async () => {
+  failures.afterThumbnailSign = () => { storageValues.delete(sessionKey); };
+  await assert.rejects(() => library.getDocumentThumbnailUrls(['test.jpg'], userId), library.UploadScopeError);
+  assert.equal(requestsFor('POST', '/storage/v1/object/sign/document-thumbnails').length, 1);
 });
 
 test('la bibliothèque paginée joint explicitement profiles via la FK documents', async () => {

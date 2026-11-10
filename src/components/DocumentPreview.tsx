@@ -10,8 +10,8 @@ export function DocumentPreview({ document, url, loading = false, large = false 
   const [loadedUrl, setLoadedUrl] = useState<string | null>(null);
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const badge = FILE_BADGES[getFileCategory(document.file_type)];
-  const usableUrl = url && url !== failedUrl ? url : undefined;
-  const waiting = loading || (!!usableUrl && loadedUrl !== usableUrl);
+  const usableUrl = document.deleted_at === null && (document.file_type === 'pdf' || document.file_type === 'image') && url && url !== failedUrl ? url : undefined;
+  const waiting = document.deleted_at === null && (loading || (!!usableUrl && loadedUrl !== usableUrl));
   const pages = document.page_count;
   return (
     <span className={`relative isolate block aspect-[3/4] w-full overflow-hidden rounded-[20px] bg-[#e8e4de] ${large ? 'p-6' : 'p-4 sm:p-5'}`}>
@@ -25,7 +25,7 @@ export function DocumentPreview({ document, url, loading = false, large = false 
         </span>}
       </span>
       <span className={`absolute top-3 left-3 rounded-lg px-2 py-1 text-[10px] font-extrabold tracking-wide sm:text-xs ${badge.bg} ${badge.text}`}>{badge.label}</span>
-      {typeof pages === 'number' && Number.isSafeInteger(pages) && pages > 0 && <span className="absolute right-2.5 bottom-2.5 rounded-full bg-[#141414]/90 px-2.5 py-1 text-[10px] font-bold text-white sm:text-xs">{pages} {pages === 1 ? 'page' : 'pages'}</span>}
+      {document.file_type === 'pdf' && document.deleted_at === null && typeof pages === 'number' && Number.isSafeInteger(pages) && pages > 0 && <span className="absolute right-2.5 bottom-2.5 rounded-full bg-[#141414]/90 px-2.5 py-1 text-[10px] font-bold text-white sm:text-xs">{pages} {pages === 1 ? 'page' : 'pages'}</span>}
     </span>
   );
 }

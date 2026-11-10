@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { getDocumentSignedUrl, getSupabaseClientState, subscribeSupabaseClient } from '../lib/supabase';
-import { errorMessage } from '../lib/errors';
+import { userError } from '../lib/errors';
 
 interface PreparedLink {
   url: string;
@@ -68,7 +68,7 @@ export function useDocumentLink(filePath: string, downloadName?: string) {
       if (expiresAt <= Date.now()) throw new Error('La préparation du lien a pris trop de temps. Réessayez.');
       setPrepared({ url, expiresAt, filePath: captured.filePath, downloadName: captured.downloadName, userId: captured.userId, generation: captured.generation });
     } catch (error) {
-      if (isCurrent()) setLinkError(errorMessage(error, 'Impossible de préparer l’ouverture. Réessayez.'));
+      if (isCurrent()) setLinkError(userError(error, 'Impossible de préparer le téléchargement. Réessayez.'));
     } finally {
       if (pendingRequest.current === request) pendingRequest.current = null;
       if (isCurrent()) setIsPreparing(false);

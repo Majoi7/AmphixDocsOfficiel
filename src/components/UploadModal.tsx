@@ -3,7 +3,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { AlertCircle, Camera, CheckCircle2, FileText, Images, UploadCloud, X } from 'lucide-react';
 import {
   type DocumentItem, MAX_DOCUMENT_SIZE, STATUS_CONFIG, formatFileSize,
-  hashUploadFile, prepareUploadDocument, resumeUserDocument, validateClassification,
+  hashUploadFile, prepareUploadDocument, resumeUserDocument, validateClassification, completeDocumentPreview,
 } from '../lib/supabase';
 import {
   attachUploadFiles, canRetryUploadBatch, clearCompletedUploadJournal,
@@ -440,8 +440,10 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
         }
       }
       setPreparationLabel(null);
-      const result = await runUploadBatch(working, { generation: origin.generation, isCurrent, uploadDocument: resumeUserDocument },
-        publishBatch, (report) => { if (isCurrent()) reportRef.current(report); });
+      const result = await runUploadBatch(working, {
+        generation: origin.generation, isCurrent, uploadDocument: resumeUserDocument,
+        completePreview: (document, file) => completeDocumentPreview(document, userId, file),
+      }, publishBatch, (report) => { if (isCurrent()) reportRef.current(report); });
       publishBatch(result);
       if (isUploadBatchComplete(result)) {
         try {

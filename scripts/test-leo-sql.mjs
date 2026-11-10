@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-// Contrôles TEXTUELS de V7 : ne prouvent ni exécution PostgreSQL ni RLS distantes.
+// Contrôles TEXTUELS de V7/V8 : ne prouvent ni exécution PostgreSQL ni RLS distantes.
 const sql = readFileSync(new URL('../supabase/migration_v7.sql', import.meta.url), 'utf8')
+  .replace(/--[^\r\n]*/g, '');
+const v8 = readFileSync(new URL('../supabase/migration_v8.sql', import.meta.url), 'utf8')
   .replace(/--[^\r\n]*/g, '');
 const edge = readFileSync(new URL('../supabase/functions/leo-search/index.ts', import.meta.url), 'utf8');
 
@@ -53,6 +55,32 @@ test('RPC de quota DEFINER à search_path fermé, sans lecture de documents priv
     assert.match(sql, new RegExp(`REVOKE ALL ON FUNCTION public\\.${name}\\([^;]+FROM PUBLIC, anon, authenticated;`));
   }
 });
+test('V8 remplace seulement la recherche : transaction, prérequis, signature et droits conservés', () => {
+  assert.match(v8.trim(), /^BEGIN;/); assert.match(v8.trim(), /COMMIT;$/);
+  assert.match(v8, /to_regprocedure\('public\.leo_search_documents\(text\[\],text,text,text,date,date,text\)'\)/);
+  assert.match(v8, /NOTIFY pgrst, 'reload schema'/);
+  assert.doesNotMatch(v8, /DROP |TRUNCATE|SECURITY DEFINER|CREATE POLICY|ALTER TABLE|CREATE EXTENSION/i);
+  assert.equal((v8.match(/CREATE OR REPLACE FUNCTION/g) ?? []).length, 1);
+  assert.match(v8, /RETURNS SETOF public\.documents LANGUAGE plpgsql STABLE SECURITY INVOKER/);
+  assert.match(v8, /SET search_path = pg_catalog SET row_security = on/);
+  assert.match(v8, /document\.deleted_at IS NULL AND \(document\.status = 'approved' OR document\.user_id = actor\)/);
+  assert.match(v8, /SET statement_timeout = '5s'/); assert.match(v8, /LIMIT 30;/);
+  assert.match(v8, /cardinality\(p_keywords\) > 8/);
+  assert.match(v8, /REVOKE ALL ON FUNCTION public\.leo_search_documents\([^;]+FROM PUBLIC, anon, authenticated;/);
+  assert.doesNotMatch(v8, /GRANT[^;]+TO (?:PUBLIC|anon);/);
+});
+test('V8 : mots disjonctifs normalisés, lettres contextuelles et bonus après le nombre de mots', () => {
+  assert.match(v8, /public\.leo_normalize_text\(array_to_string\(p_keywords, ' '\)\)/);
+  assert.match(v8, /LIKE ANY\(substring_patterns\)/);
+  assert.match(v8, /OPERATOR\(%1\$I\.%%>\) ANY\(fuzzy_terms\)/);
+  assert.doesNotMatch(v8, /first_term|AND NOT EXISTS \(SELECT 1 FROM unnest\(terms\)/);
+  assert.match(v8, /previous IN \('langage', 'language'\)/);
+  assert.match(v8, /term = ANY\(words\.parts\)/);
+  assert.match(v8, /count\(\*\) FILTER \(WHERE similarity >= 0\.4\) AS matched_words/);
+  assert.match(v8, /scored\.matched_words END DESC,[\s\S]*scored\.phrase_bonus END DESC,[\s\S]*scored\.similarity_score END DESC/);
+  assert.match(v8, /extension\.extnamespace/);
+});
+
 test('Edge crée seulement un client public avec JWT utilisateur vérifié et relit sous RLS', () => {
   assert.match(edge, /Deno\.env\.get\('SUPABASE_ANON_KEY'\)/);
   assert.match(edge, /Authorization: `Bearer \$\{token\}`/); assert.match(edge, /client\.auth\.getUser\(token\)/);

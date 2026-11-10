@@ -2,6 +2,8 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import type { Database, DocumentRow, DocumentTrashState, ProfileRow, UserRole } from './database.types';
 import { getSupabaseClient, getSupabaseClientState, subscribeSupabaseClient } from './supabase-config';
 import { errorMessage } from './errors';
+import { assertPreviewIdentity, finishDocumentPreview, needsDocumentPreview } from './preview-completion';
+import type { GeneratedPreview } from './preview-generation';
 
 export {
   getStoredSupabaseConfig, isSupabaseConfigured, reinitializeSupabase,
@@ -212,7 +214,8 @@ function validateUploadRequest(request: UploadDocumentRequest): void {
 // Jeton vérifié et figé dans la fermeture, jamais dans le journal. Le client de
 // travail ne restaure pas de session. L'unification du client relève du LOT 5.
 async function withUploadClient<T>(
-  userId: string, projectUrl: string, operation: (client: SupabaseClient<Database>, check: () => void) => Promise<T>
+  userId: string, projectUrl: string, operation: (client: SupabaseClient<Database>, check: () => void, signal: AbortSignal) => Promise<T>,
+  signal?: AbortSignal
 ): Promise<T> {
   assertUuid(userId, 'Identifiant du compte');
   const origin = getSupabaseClientState();
@@ -221,6 +224,8 @@ async function withUploadClient<T>(
   const controller = new AbortController();
   let invalidated = false;
   const invalidate = () => { invalidated = true; controller.abort(); };
+  signal?.addEventListener('abort', invalidate, { once: true });
+  if (signal?.aborted) invalidate();
   const check = () => {
     const current = getSupabaseClientState();
     if (invalidated || current.client !== authClient || current.generation !== origin.generation) {
@@ -244,15 +249,16 @@ async function withUploadClient<T>(
     if (verified.error || verified.data.user?.id !== userId) throw new UploadScopeError(`La session n’a pas pu être vérifiée : ${errorMessage(verified.error, 'Compte incompatible.')} Aucun nouvel envoi n’est autorisé.`);
     const client = createClient<Database>(projectUrl, origin.config.key, {
       accessToken: async () => { check(); return accessToken; },
-      global: { fetch: (input, init) => { check(); return globalThis.fetch(input, { ...init, signal: controller.signal }); } },
+      global: { fetch: (input, init) => { check(); return globalThis.fetch(input, { ...init, signal: controller.signal, cache: 'no-store' }); } },
     });
-    const result = await operation(client, check);
+    const result = await operation(client, check, controller.signal);
     check();
     const currentSession = await authClient.auth.getSession();
     check();
     if (currentSession.error || currentSession.data.session?.user.id !== userId) throw new UploadScopeError('La session a changé avant la confirmation. Vérifiez cette opération avec son compte d’origine.');
     return result;
   } finally {
+    signal?.removeEventListener('abort', invalidate);
     subscription.unsubscribe();
     unsubscribeClient();
     controller.abort();
@@ -400,19 +406,142 @@ export async function getDocumentThumbnailUrls(paths: readonly string[], actorId
   const unique = [...new Set(paths)];
   if (!unique.length) return {};
   return withUploadClient(actorId, getSupabaseClientState().config.url, async (client, check) => {
+    // Un seul aller-retour pour la sélection entière ; les cartes ne signent rien.
+    const result = await client.storage.from('document-thumbnails').createSignedUrls(unique, 120);
+    check();
+    if (result.error || !Array.isArray(result.data)) throw new Error(errorMessage(result.error, 'Aperçus indisponibles. Réessayez.'));
     const urls: Record<string, string> = {};
-    for (let index = 0; index < unique.length; index += LIBRARY_PAGE_SIZE) {
-      check();
-      const batch = unique.slice(index, index + LIBRARY_PAGE_SIZE);
-      const result = await client.storage.from('document-thumbnails').createSignedUrls(batch, 120);
-      check();
-      if (result.error || !Array.isArray(result.data)) throw new Error(errorMessage(result.error, 'Aperçus indisponibles. Réessayez.'));
-      for (const item of result.data) {
-        if (!item.error && item.path && batch.includes(item.path) && item.signedUrl) urls[item.path] = item.signedUrl;
-      }
+    for (const item of result.data) {
+      if (!item.error && item.path && unique.includes(item.path) && item.signedUrl) urls[item.path] = item.signedUrl;
     }
     return urls;
   });
+}
+
+async function readPreviewDocument(client: SupabaseClient<Database>, expected: DocumentItem, check: () => void): Promise<DocumentItem> {
+  assertUuid(expected.id);
+  const result = await client.from('documents').select(DOCUMENT_SELECT).eq('id', expected.id).is('deleted_at', null).maybeSingle();
+  check();
+  if (result.error || !result.data) throw new Error(errorMessage(result.error, 'Fichier indisponible.'));
+  const document = mapDocument(result.data);
+  assertPreviewIdentity(expected, document);
+  return document;
+}
+async function downloadPreviewSource(
+  client: SupabaseClient<Database>, document: DocumentItem, check: () => void, signal: AbortSignal
+): Promise<Blob> {
+  const signed = await client.storage.from('documents').createSignedUrl(document.file_path, 60);
+  check();
+  if (signed.error || !signed.data?.signedUrl) throw new Error('Le fichier est indisponible.');
+  const response = await globalThis.fetch(signed.data.signedUrl, {
+    cache: 'no-store', credentials: 'omit', referrerPolicy: 'no-referrer', signal,
+  });
+  check();
+  if (!response.ok || !response.body) throw new Error('Le fichier ne peut pas être lu.');
+  if (Number(response.headers.get('content-length')) > MAX_DOCUMENT_SIZE) {
+    await response.body.cancel();
+    throw new Error('Fichier trop volumineux.');
+  }
+  // Borne également les réponses sans Content-Length avant de construire le Blob.
+  const reader = response.body.getReader();
+  const chunks: ArrayBuffer[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      check();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_DOCUMENT_SIZE) throw new Error('Fichier trop volumineux.');
+      chunks.push(Uint8Array.from(value).buffer);
+    }
+  } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
+  if (!size || (document.file_size !== null && document.file_size !== size)) throw new Error('Le fichier est incomplet.');
+  return new Blob(chunks, { type: response.headers.get('content-type') || 'application/octet-stream' });
+}
+export async function getDocumentPreviewSource(expected: DocumentItem, actorId: string, signal?: AbortSignal): Promise<Blob> {
+  return withUploadClient(actorId, getSupabaseClientState().config.url, async (client, check, scopedSignal) => {
+    const document = await readPreviewDocument(client, expected, check);
+    return downloadPreviewSource(client, document, check, scopedSignal);
+  }, signal);
+}
+
+async function saveDocumentPreview(
+  client: SupabaseClient<Database>, expected: DocumentItem, preview: GeneratedPreview, check: () => void
+): Promise<DocumentItem> {
+  let document = await readPreviewDocument(client, expected, check);
+  if (!needsDocumentPreview(document)) return document;
+  let path = document.thumbnail_path;
+  if (!path) {
+    const blob = preview.blob;
+    if (!blob || blob.type !== 'image/jpeg' || blob.size < 1 || blob.size > 1048576) throw new Error('Miniature incompatible.');
+    assertUuid(document.user_id);
+    const hash = await hashUploadFile(blob);
+    check();
+    path = `${document.user_id}/${document.id}/${hash}.jpg`;
+    const uploaded = await client.storage.from('document-thumbnails').upload(path, blob, {
+      contentType: 'image/jpeg', cacheControl: '0', upsert: false,
+    });
+    check();
+    if (uploaded.error) {
+      // Une réponse perdue ou un doublon peut cacher un objet déjà reçu. Vérifier
+      // ses octets, sans l'écraser ni supprimer un objet non encore associé.
+      const existing = await client.storage.from('document-thumbnails').download(path, {}, { cache: 'no-store' });
+      check();
+      if (existing.error || !existing.data || existing.data.size !== blob.size || await hashUploadFile(existing.data) !== hash) {
+        throw new Error(errorMessage(uploaded.error, 'La miniature n’a pas été reçue.'));
+      }
+      check();
+    } else if (uploaded.data.path !== path) throw new Error('Le transfert de la miniature n’a pas été confirmé.');
+  }
+  // Une génération concurrente peut avoir associé un autre JPEG entre-temps.
+  document = await readPreviewDocument(client, document, check);
+  if (!needsDocumentPreview(document)) return document;
+  path = document.thumbnail_path || path;
+  if (document.page_count !== null && document.page_count !== preview.pageCount) throw new Error('Le nombre de pages a changé.');
+  const result = await client.rpc('set_document_preview', {
+    p_document_id: document.id, p_thumbnail_path: path, p_page_count: preview.pageCount,
+  });
+  check();
+  if (result.error || !Array.isArray(result.data) || result.data.length !== 1) throw new Error(errorMessage(result.error, 'L’aperçu n’a pas été enregistré.'));
+  const confirmed = mapDocument(result.data[0]);
+  assertPreviewIdentity(document, confirmed);
+  if (confirmed.thumbnail_path !== path || confirmed.page_count !== preview.pageCount) throw new Error('L’aperçu n’a pas été confirmé.');
+  return { ...document, ...confirmed, author_name: document.author_name, author_avatar: document.author_avatar, author_email: document.author_email };
+}
+export async function completeDocumentPreview(
+  expected: DocumentItem, actorId: string, source?: Blob, signal?: AbortSignal, requireAdmin = false
+): Promise<DocumentItem> {
+  if (!needsDocumentPreview(expected)) return expected;
+  return withUploadClient(actorId, getSupabaseClientState().config.url, async (client, check, scopedSignal) => {
+    const checkRole = async () => {
+      if (requireAdmin && await fetchUserRole(actorId, client) !== 'admin') throw new Error('Vos droits ont changé.');
+      check();
+    };
+    await checkRole();
+    const confirmed = await finishDocumentPreview(expected, {
+      check,
+      read: () => readPreviewDocument(client, expected, check),
+      source: (document) => downloadPreviewSource(client, document, check, scopedSignal),
+      generate: async (blob, type, options) => {
+        const { generateDocumentPreview } = await import('./preview-generation');
+        check();
+        return generateDocumentPreview(blob, type, options);
+      },
+      save: async (document, preview) => { await checkRole(); return saveDocumentPreview(client, document, preview, check); },
+    }, source, scopedSignal);
+    await checkRole();
+    return confirmed;
+  }, signal);
+}
+export async function getMissingDocumentPreviews(actorId: string, afterId: string | null = null, signal?: AbortSignal): Promise<DocumentItem[]> {
+  if (afterId) assertUuid(afterId);
+  return withUploadClient(actorId, getSupabaseClientState().config.url, async (client, check) => {
+    const result = await client.rpc('get_missing_document_previews', { p_after_id: afterId });
+    check();
+    if (result.error || !Array.isArray(result.data) || result.data.length > 20) throw new Error(errorMessage(result.error, 'La liste des aperçus est indisponible.'));
+    return result.data.map(mapDocument);
+  }, signal);
 }
 
 export async function getDocumentSignedUrl(filePath: string, downloadName?: string): Promise<string> {

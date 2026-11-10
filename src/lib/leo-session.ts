@@ -4,6 +4,7 @@ import {
   type LeoDocument, type LeoExplanation, type LeoPlan, type LeoRequest, type LeoResponse,
 } from '../../supabase/functions/_shared/leo-contract';
 import { LeoClientError, type LeoErrorCode } from './leo-client';
+import { mergeDocumentPreview } from './preview-completion';
 
 export type LeoStepStatus = 'pending' | 'active' | 'complete' | 'error' | 'skipped';
 export interface LeoEntry {
@@ -150,6 +151,15 @@ export function createLeoSession(options: LeoSessionOptions) {
         candidates: entry.candidates.filter((document) => document.id !== id),
         documents: entry.documents.filter((document) => document.id !== id),
         explanations: entry.explanations.filter((explanation) => explanation.id !== id),
+      })) });
+    },
+    // Une miniature ne change ni les métadonnées classées ni leur explication.
+    // Ne jamais ajouter à l'historique un document absent ou devenu inaccessible.
+    updateDocumentPreview: (document: LeoDocument) => {
+      if (!options.isCurrent()) return;
+      publish({ entries: snapshot.entries.map((entry) => ({ ...entry,
+        candidates: entry.candidates.map((item) => mergeDocumentPreview(item, document)),
+        documents: entry.documents.map((item) => mergeDocumentPreview(item, document)),
       })) });
     },
     updateDocument: (document: LeoDocument) => {

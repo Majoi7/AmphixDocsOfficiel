@@ -49,7 +49,7 @@ function documentFrom(request) {
     description: request.description || null, file_name: request.fileName, file_path: request.identity.filePath,
     file_size: request.fileSize, file_type: request.fileType, school_name: request.schoolName,
     subject_name: request.subjectName, deleted_at: null, deleted_by: null, status: 'pending', rejection_reason: null,
-    reviewed_by: null, reviewed_at: null, created_at: '2026-01-01T00:00:00Z',
+    reviewed_by: null, reviewed_at: null, created_at: '2026-01-01T00:00:00Z', thumbnail_path: null, page_count: null,
   };
 }
 function batch(entries = [prepared()], id = batchId) {
@@ -112,6 +112,128 @@ test('trois réussites remontent cumulativement, sous les mêmes identifiants', 
   assert.ok(result.entries.every((entry) => entry.status === 'confirmed' && entry.document.status === 'pending'));
   assert.equal(library.isUploadBatchComplete(result), true);
   assert.deepEqual(value.entries.map((entry) => entry.status), ['pending', 'pending', 'pending']);
+});
+
+test('l’aperçu facultatif utilise le même original après confirmation puis remonte les pages réelles', async () => {
+  const entry = prepared();
+  const order = [];
+  const reports = [];
+  const changes = [];
+  const result = await library.runUploadBatch(batch([entry]), dependencies({
+    uploadDocument: async (request, file) => {
+      assert.equal(file, entry.file);
+      order.push('original');
+      return documentFrom(request);
+    },
+    completePreview: async (document, file) => {
+      order.push('aperçu');
+      assert.equal(file, entry.file);
+      assert.equal(changes.at(-1).entries[0].status, 'confirmed');
+      assert.equal(changes.at(-1).entries[0].error, null);
+      return { ...document, thumbnail_path: `${userId}/${document.id}/${'a'.repeat(64)}.jpg`, page_count: 24 };
+    },
+  }), (value) => changes.push(value), (report) => reports.push(report));
+  assert.deepEqual(order, ['original', 'aperçu']);
+  assert.equal(result.entries[0].request.identity.id, entry.request.identity.id);
+  assert.equal(result.entries[0].document.page_count, 24);
+  assert.equal(result.entries[0].document.thumbnail_path, `${userId}/${entry.request.identity.id}/${'a'.repeat(64)}.jpg`);
+  assert.deepEqual(reports.at(-1).documents, [result.entries[0].document]);
+  assert.equal(reports.at(-1).complete, true);
+});
+
+test('une panne d’aperçu laisse le dépôt réussi sans message ni renvoi de l’original au réessai', async () => {
+  let uploads = 0;
+  let previews = 0;
+  const reports = [];
+  const deps = dependencies({
+    uploadDocument: async (request) => { uploads++; return documentFrom(request); },
+    completePreview: async () => { previews++; throw new Error('Panne de miniature simulée'); },
+  });
+  const first = await library.runUploadBatch(batch(), deps, noChange, (report) => reports.push(report));
+  assert.equal(library.isUploadBatchComplete(first), true);
+  assert.equal(library.canRetryUploadBatch(first), false);
+  assert.equal(first.entries[0].error, null);
+  assert.equal(first.entries[0].failureKind, null);
+  assert.equal(first.notificationError, null);
+  assert.equal(first.entries[0].document.thumbnail_path, null);
+  assert.equal(first.entries[0].document.page_count, null);
+  const retried = await library.runUploadBatch(first, deps, noChange, (report) => reports.push(report));
+  assert.equal(uploads, 1);
+  assert.equal(previews, 1);
+  assert.equal(retried.entries[0].request.identity.id, first.entries[0].request.identity.id);
+  assert.equal(reports.at(-1).complete, true);
+  assert.doesNotMatch(JSON.stringify(reports), /Panne de miniature/);
+});
+
+test('une confirmation d’aperçu incomplète ou d’une autre identité ne remplace pas le succès principal', async () => {
+  for (const changes of [
+    { id: prepared(2).request.identity.id }, { user_id: otherUserId },
+    { file_path: 'autre-original.pdf' }, { file_type: 'image' },
+    { deleted_at: '2026-01-03T00:00:00Z' }, { thumbnail_path: null }, { page_count: null },
+  ]) {
+    const result = await library.runUploadBatch(batch(), dependencies({
+      completePreview: async (document) => ({
+        ...document, thumbnail_path: `${userId}/${document.id}/${'a'.repeat(64)}.jpg`, page_count: 3, ...changes,
+      }),
+    }), noChange, noChange);
+    assert.equal(library.isUploadBatchComplete(result), true);
+    assert.deepEqual(result.entries[0].document, documentFrom(prepared().request));
+    assert.equal(result.entries[0].error, null);
+  }
+});
+
+test('une réponse d’aperçu d’un ancien compte n’est ni projetée ni publiée', async () => {
+  let current = true;
+  let uploads = 0;
+  const changes = [];
+  const reports = [];
+  const result = await library.runUploadBatch(batch([prepared(1), prepared(2)]), dependencies({
+    isCurrent: () => current,
+    uploadDocument: async (request) => { uploads++; return documentFrom(request); },
+    completePreview: async (document) => {
+      current = false;
+      return { ...document, thumbnail_path: `${userId}/${document.id}/${'a'.repeat(64)}.jpg`, page_count: 3 };
+    },
+  }), (value) => changes.push(value), (report) => reports.push(report));
+  assert.equal(uploads, 1);
+  assert.equal(reports.length, 0);
+  assert.equal(result.entries[0].status, 'confirmed');
+  assert.equal(result.entries[0].document.thumbnail_path, null);
+  assert.equal(result.entries[1].status, 'pending');
+  assert.ok(changes.every((value) => !value.entries[0].document?.thumbnail_path));
+});
+
+test('les autres formats et les aperçus déjà complets ne lancent aucune génération', async () => {
+  let previews = 0;
+  for (const fileType of ['doc', 'autre']) {
+    const result = await library.runUploadBatch(batch([prepared(1, { fileType })]), dependencies({
+      completePreview: async (document) => { previews++; return document; },
+    }), noChange, noChange);
+    assert.equal(library.isUploadBatchComplete(result), true);
+  }
+  await library.runUploadBatch(batch(), dependencies({
+    uploadDocument: async (request) => ({ ...documentFrom(request), thumbnail_path: 'historique.webp', page_count: 3 }),
+    completePreview: async (document) => { previews++; return document; },
+  }), noChange, noChange);
+  assert.equal(previews, 0);
+});
+
+test('un lot restauré peut compléter son aperçu sans original local ni nouvelle identité', async () => {
+  const store = memoryStorage();
+  library.saveUploadJournal(store, batch());
+  const restored = library.readUploadJournal(store, userId, projectUrl);
+  let previews = 0;
+  const result = await library.runUploadBatch(restored, dependencies({
+    completePreview: async (document, file) => {
+      previews++;
+      assert.equal(file, undefined);
+      assert.equal(document.id, restored.entries[0].request.identity.id);
+      return { ...document, thumbnail_path: `${userId}/${document.id}/${'a'.repeat(64)}.jpg`, page_count: 8 };
+    },
+  }), noChange, noChange);
+  assert.equal(previews, 1);
+  assert.equal(result.entries[0].document.page_count, 8);
+  assert.equal(library.isUploadBatchComplete(result), true);
 });
 
 test('une panne au milieu n’empêche pas le fichier suivant et la reprise ne rejoue que l’échec', async () => {
