@@ -137,7 +137,10 @@ function memoryIndexedDb(options = {}) {
           if (!ended) tx.abort();
           return;
         }
-        if (kind === 'get') request.result = structuredClone(data.get(key));
+        if (kind === 'get') {
+          options.onGet?.(key, mode);
+          request.result = structuredClone(data.get(key));
+        }
         if (kind === 'put') { data.set(key, value); request.result = key; }
         if (kind === 'delete') data.delete(key);
         request.onsuccess?.({ target: request });
@@ -493,4 +496,339 @@ test('la réconciliation ne remplace jamais un autre lot, contenu, compte ou pro
   await assert.rejects(draft.reconcileUploadDraftBatch(otherScope, stored, null, null, hashFile), /autre dépôt/);
   await assert.rejects(draft.reconcileUploadDraftBatch(scope, null, { ...batch(), projectUrl: 'https://autre.invalid' }, null, hashFile), /autre dépôt/);
   assert.equal(await draft.reconcileUploadDraftBatch(scope, null, null, null, hashFile), null);
+});
+
+const retryOptions = (overrides = {}) => ({ readJournal: () => null, hashFile, isCurrent: () => true, ...overrides });
+const storedRecord = (memory) => structuredClone(memory.values.get(draft.uploadDraftKey(scope)));
+const writes = (memory) => memory.events.filter(([kind]) => kind === 'put').length;
+
+test('sauvegarde et reprise exigent une lecture confirmée, y compris après une relecture échouée', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await assert.rejects(persistence.save(input()), /doit d’abord être vérifié/);
+  await assert.rejects(persistence.retry(input(), retryOptions()), /doit d’abord être vérifié/);
+  assert.equal(memory.events.length, 0);
+  await persistence.read();
+  memory.options.getError = new Error('Relecture refusée.');
+  await assert.rejects(persistence.read(), /Relecture refusée/);
+  memory.options.getError = null;
+  await assert.rejects(persistence.retry(input(), retryOptions()), /doit d’abord être vérifié/);
+  await persistence.read();
+  assert.equal((await persistence.retry(input(), retryOptions())).revision, 1);
+});
+
+test('le garde interdit une sauvegarde obsolète avant ouverture et avant put', async () => {
+  const memory = memoryIndexedDb();
+  await assert.rejects(draft.saveUploadDraft(scope, input(), null, memory.factory, () => false), /compte du dépôt a changé/);
+  assert.equal(memory.events.length, 0);
+  let current = true;
+  memory.options.onGet = () => { current = false; };
+  await assert.rejects(draft.saveUploadDraft(scope, input(), null, memory.factory, () => current), /compte du dépôt a changé/);
+  assert.equal(memory.values.size, 0);
+  assert.equal(writes(memory), 0);
+  assert.ok(memory.events.some(([kind]) => kind === 'abort'));
+  assert.equal(memory.closed, 1);
+});
+
+test('le garde est transmis aux sauvegardes FIFO sans condamner la file après une erreur', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  await assert.rejects(persistence.save(input(), () => false), /compte du dépôt a changé/);
+  assert.equal(memory.values.size, 0);
+  const first = persistence.save(input({ titles: ['Premier'] }), () => true);
+  const second = persistence.save(input({ titles: ['Deuxième'] }), () => true);
+  assert.equal((await first).revision, 1);
+  assert.equal((await second).revision, 2);
+  assert.equal((await draft.readUploadDraft(scope, memory.factory)).titles[0], 'Deuxième');
+});
+
+test('le contrôle du lot et du scope utilise la copie encodée avant les attentes', async () => {
+  const memory = memoryIndexedDb();
+  const original = batch();
+  await draft.saveUploadDraft(scope, input({ batch: original }), null, memory.factory);
+  const mutableScope = { ...scope };
+  const replacement = input({ batch: batch(otherBatchId) });
+  memory.options.onGet = () => { replacement.batch = original; mutableScope.userId = otherScope.userId; };
+  await assert.rejects(draft.saveUploadDraft(mutableScope, replacement, 1, memory.factory), /autre dépôt/);
+  assert.equal(storedRecord(memory).batch, batches.serializeUploadBatch(original));
+  memory.options.onGet = null;
+  const validScope = { ...scope };
+  const valid = input({ titles: ['Copie capturée'], batch: original });
+  const pending = draft.saveUploadDraft(validScope, valid, 1, memory.factory);
+  validScope.userId = otherScope.userId;
+  valid.batch = batch(otherBatchId);
+  valid.titles[0] = 'Modification tardive';
+  assert.equal((await pending).titles[0], 'Copie capturée');
+  assert.equal(storedRecord(memory).userId, scope.userId);
+  assert.equal(storedRecord(memory).batch, batches.serializeUploadBatch(original));
+});
+
+test('Réessayer relit une révision compatible et conserve les saisies locales', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  await persistence.save(input());
+  const confirmed = storedRecord(memory);
+  memory.values.set(confirmed.key, { ...confirmed, revision: 2 });
+  const local = input({ titles: ['Titre local'], description: 'Saisie locale' });
+  await assert.rejects(persistence.save(local), /autre dépôt/);
+  const before = writes(memory);
+  const saved = await persistence.retry(local, retryOptions());
+  assert.equal(saved.revision, 3);
+  assert.equal(saved.titles[0], 'Titre local');
+  assert.equal(saved.description, 'Saisie locale');
+  assert.equal(await saved.files[0].text(), 'test');
+  assert.equal(writes(memory), before + 1);
+  assert.equal((await persistence.save(input({ description: 'Saisie suivante' }))).revision, 4);
+});
+
+test('une copie déjà identique aux saisies locales peut être confirmée après réponse perdue', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  const local = input({ titles: ['Titre déjà sauvé'], description: 'Réponse locale perdue' });
+  memory.values.set(draft.uploadDraftKey(scope), draft.encodeUploadDraft(scope, local, 1, lastModified));
+  await assert.rejects(persistence.save(local), /autre dépôt/);
+  const saved = await persistence.retry(local, retryOptions());
+  assert.equal(saved.revision, 2);
+  assert.equal(saved.description, local.description);
+});
+
+test('une reprise copie les tableaux à l’appel et attend le commit avant confirmation', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  memory.options.pauseWriteCommit = true;
+  const local = input({ titles: ['Titre capturé'] });
+  let resolved = false;
+  const pending = persistence.retry(local, retryOptions()).then((value) => { resolved = true; return value; });
+  local.files.length = 0;
+  local.titles[0] = 'Muté après appel';
+  await memory.commitReady;
+  assert.equal(resolved, false);
+  assert.equal(memory.values.size, 0);
+  memory.commit();
+  const saved = await pending;
+  assert.equal(saved.titles[0], 'Titre capturé');
+  assert.equal(await saved.files[0].text(), 'test');
+});
+
+test('Réessayer ne remplace pas les champs ou les octets d’un autre onglet', async () => {
+  for (const changes of [{ titles: ['Autre titre'] }, { description: 'Autre description' }, { schoolName: 'IFRI' },
+    { subjectName: 'Anglais' }, { files: [file('faux')] }, { files: [file('test', 'autre.pdf')] }]) {
+    const memory = memoryIndexedDb();
+    const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+    await persistence.read();
+    await persistence.save(input());
+    const newer = draft.encodeUploadDraft(scope, input(changes), 2, lastModified);
+    memory.values.set(newer.key, newer);
+    const before = writes(memory);
+    const local = input({ description: 'Saisie dans cet onglet' });
+    await assert.rejects(persistence.retry(local, retryOptions()), /autre dépôt/);
+    assert.deepEqual(storedRecord(memory), newer);
+    assert.equal(writes(memory), before);
+    assert.equal(local.description, 'Saisie dans cet onglet');
+    await assert.rejects(persistence.save(local), /autre dépôt/);
+  }
+});
+
+test('la dernière copie confirmée ne partage pas ses tableaux avec le résultat rendu', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  const rendered = await persistence.save(input());
+  rendered.titles[0] = 'Titre étranger';
+  const newer = draft.encodeUploadDraft(scope, input({ titles: ['Titre étranger'] }), 2, lastModified);
+  memory.values.set(newer.key, newer);
+  await assert.rejects(persistence.retry(input({ description: 'Saisie locale' }), retryOptions()), /autre dépôt/);
+  assert.deepEqual(storedRecord(memory), newer);
+});
+
+test('une panne temporaire de quota ou de lecture conserve les saisies et permet la reprise', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  await persistence.save(input());
+  const local = input({ titles: ['À conserver'] });
+  memory.options.quota = true;
+  await assert.rejects(persistence.retry(local, retryOptions()), /Quota simulé/);
+  assert.equal(storedRecord(memory).revision, 1);
+  memory.options.quota = false;
+  memory.options.getError = new Error('Relecture temporairement refusée.');
+  await assert.rejects(persistence.retry(local, retryOptions()), /Relecture temporairement refusée/);
+  assert.equal(storedRecord(memory).revision, 1);
+  memory.options.getError = null;
+  const saved = await persistence.retry(local, retryOptions());
+  assert.equal(saved.revision, 2);
+  assert.equal(saved.titles[0], 'À conserver');
+});
+
+test('un autre lot IndexedDB ou journal est bloqué sans adoption silencieuse', async () => {
+  for (const hasLocalBatch of [false, true]) {
+    for (const source of ['draft', 'journal']) {
+      const memory = memoryIndexedDb();
+      const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+      await persistence.read();
+      const local = input({ batch: hasLocalBatch ? batch() : null });
+      await persistence.save(local);
+      const other = batch(otherBatchId);
+      if (source === 'draft') memory.values.set(draft.uploadDraftKey(scope), draft.encodeUploadDraft(scope, input({ batch: other }), 2, lastModified));
+      const before = storedRecord(memory);
+      const beforeWrites = writes(memory);
+      await assert.rejects(persistence.retry(local, retryOptions({ readJournal: () => source === 'journal' ? other : null })), /autre dépôt/);
+      assert.deepEqual(storedRecord(memory), before);
+      assert.equal(writes(memory), beforeWrites);
+    }
+  }
+});
+
+test('la reprise répare la coupure journal/brouillon avec les mêmes identités et octets', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  await persistence.save(input());
+  const localBatch = batch();
+  const journal = batches.restoreUploadBatch(batches.serializeUploadBatch(localBatch), scope.userId, scope.projectUrl);
+  const saved = await persistence.retry(input({ batch: localBatch }), retryOptions({ readJournal: () => journal }));
+  assert.equal(saved.revision, 2);
+  assert.equal(saved.batch.id, batchId);
+  assert.deepEqual(saved.batch.entries[0].request, localBatch.entries[0].request);
+  assert.equal(await saved.batch.entries[0].file.text(), 'test');
+  const restored = await draft.readUploadDraft(scope, memory.factory);
+  assert.equal(await restored.batch.entries[0].file.text(), 'test');
+  assert.equal(restored.batch.entries[0].status, 'pending');
+});
+
+test('une reprise conserve les confirmations mémoire sans les enregistrer comme preuves', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  const confirmed = await complete(batch());
+  await persistence.save(input({ batch: confirmed }));
+  const journal = batches.restoreUploadBatch(batches.serializeUploadBatch(confirmed), scope.userId, scope.projectUrl);
+  const saved = await persistence.retry(input({ batch: confirmed }), retryOptions({ readJournal: () => journal }));
+  assert.equal(saved.batch.entries[0].status, 'confirmed');
+  assert.deepEqual(saved.batch.entries[0].document, confirmed.entries[0].document);
+  const restored = await draft.readUploadDraft(scope, memory.factory);
+  assert.equal(restored.batch.entries[0].status, 'pending');
+  assert.equal(restored.batch.entries[0].document, null);
+});
+
+test('la reprise rapproche la complétion legacy sans changer UUID, chemin ou hash', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  const original = legacyBatch();
+  await persistence.save(input({ batch: original, schoolName: '', subjectName: '' }));
+  const classified = batches.completeLegacyClassification(original, 'IFRI', 'Anglais');
+  const newer = draft.encodeUploadDraft(scope, input({ batch: classified, schoolName: 'IFRI', subjectName: 'Anglais' }), 2, lastModified);
+  memory.values.set(newer.key, newer);
+  const saved = await persistence.retry(input({ batch: original, schoolName: 'EPAC', subjectName: 'Mathématiques' }), retryOptions({ readJournal: () => original }));
+  const request = saved.batch.entries[0].request;
+  assert.equal(saved.revision, 3);
+  assert.equal(saved.schoolName, 'IFRI');
+  assert.equal(saved.subjectName, 'Anglais');
+  assert.deepEqual(request.identity, original.entries[0].request.identity);
+  assert.equal(request.sha256, original.entries[0].request.sha256);
+  assert.equal(request.schoolName, 'IFRI');
+  assert.equal(request.subjectName, 'Anglais');
+});
+
+test('un changement de compte bloque la reprise avant lecture et juste après la relecture', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  const beforeEvents = memory.events.length;
+  await assert.rejects(persistence.retry(input(), retryOptions({ isCurrent: () => false })), /compte du dépôt a changé/);
+  assert.equal(memory.events.length, beforeEvents);
+  let current = true;
+  memory.options.onGet = () => { current = false; };
+  await assert.rejects(persistence.retry(input(), retryOptions({ isCurrent: () => current })), /compte du dépôt a changé/);
+  assert.equal(writes(memory), 0);
+  memory.options.onGet = null;
+  assert.equal((await persistence.retry(input(), retryOptions())).revision, 1);
+});
+
+test('un changement de compte pendant le hash n’écrit pas la reprise tardive', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  await persistence.save(input());
+  let current = true;
+  let hashes = 0;
+  const before = storedRecord(memory);
+  await assert.rejects(persistence.retry(input({ description: 'Saisie locale' }), retryOptions({
+    isCurrent: () => current,
+    hashFile: async (value) => { hashes++; current = false; return hashFile(value); },
+  })), /compte du dépôt a changé/);
+  assert.ok(hashes > 0);
+  assert.deepEqual(storedRecord(memory), before);
+});
+
+test('un changement de compte juste avant put annule la reprise atomiquement', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  await persistence.save(input());
+  const before = storedRecord(memory);
+  let current = true;
+  memory.options.onGet = (_key, mode) => { if (mode === 'readwrite') current = false; };
+  await assert.rejects(persistence.retry(input({ description: 'Saisie locale' }), retryOptions({ isCurrent: () => current })), /compte du dépôt a changé/);
+  assert.deepEqual(storedRecord(memory), before);
+  assert.equal(writes(memory), 1);
+  assert.ok(memory.events.some(([kind]) => kind === 'abort'));
+});
+
+test('une nouvelle révision entre relecture et transaction reste un conflit, sans écrasement', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  await persistence.save(input());
+  const other = draft.encodeUploadDraft(scope, input({ description: 'Autre onglet' }), 2, lastModified);
+  let changed = false;
+  await assert.rejects(persistence.retry(input({ description: 'Saisie locale' }), retryOptions({
+    hashFile: async (value) => {
+      if (!changed) { memory.values.set(other.key, other); changed = true; }
+      return hashFile(value);
+    },
+  })), /autre dépôt/);
+  assert.deepEqual(storedRecord(memory), other);
+  assert.equal(writes(memory), 1);
+});
+
+test('le journal modifié pendant la réconciliation est refusé avant toute sauvegarde', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  await persistence.save(input());
+  const journal = batches.restoreUploadBatch(batches.serializeUploadBatch(batch()), scope.userId, scope.projectUrl);
+  const original = batches.serializeUploadBatch(journal);
+  let hashes = 0;
+  const before = storedRecord(memory);
+  await assert.rejects(persistence.retry(input({ batch: batch() }), retryOptions({
+    readJournal: () => journal,
+    hashFile: async (value) => {
+      hashes++;
+      if (hashes === 3) journal.entries[0].request.title = 'Modifié pendant attente';
+      return hashFile(value);
+    },
+  })), /autre dépôt/);
+  assert.ok(hashes >= 3);
+  assert.notEqual(batches.serializeUploadBatch(journal), original);
+  assert.deepEqual(storedRecord(memory), before);
+});
+
+test('le journal est revérifié dans la transaction juste avant put', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  const local = input({ batch: batch() });
+  await persistence.save(local);
+  let journal = batch();
+  memory.options.onGet = (_key, mode) => { if (mode === 'readwrite') journal = batch(otherBatchId); };
+  const before = storedRecord(memory);
+  await assert.rejects(persistence.retry(local, retryOptions({ readJournal: () => journal })), /autre dépôt/);
+  assert.deepEqual(storedRecord(memory), before);
+  assert.equal(writes(memory), 1);
 });

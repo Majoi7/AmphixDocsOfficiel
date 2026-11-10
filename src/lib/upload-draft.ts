@@ -20,6 +20,11 @@ export interface UploadDraft extends UploadDraftInput, UploadDraftScope {
   revision: number;
   updatedAt: number;
 }
+export interface UploadDraftRetryOptions {
+  readJournal: () => UploadBatch | null;
+  hashFile: (file: Blob) => Promise<string>;
+  isCurrent: () => boolean;
+}
 interface DraftFile {
   name: string;
   type: string;
@@ -261,23 +266,32 @@ export async function readUploadDraft(scope: UploadDraftScope, factory?: IDBFact
     };
   }));
 }
+function assertCurrentDraft(isCurrent: () => boolean): void {
+  if (!isCurrent()) throw new Error('Le compte du dépôt a changé. Rouvrez le dépôt avec le compte utilisé.');
+}
+
 export async function saveUploadDraft(
   scope: UploadDraftScope, input: UploadDraftInput, expectedRevision: number | null, factory?: IDBFactory,
+  isCurrent: () => boolean = () => true,
 ): Promise<UploadDraft> {
   // Le contenu est construit avant la transaction : aucune attente asynchrone
   // ne laisse IndexedDB fermer une transaction encore nécessaire.
-  const next = encodeUploadDraft(scope, input, (expectedRevision || 0) + 1);
+  assertCurrentDraft(isCurrent);
+  const captured = { ...scope };
+  const next = encodeUploadDraft(captured, input, (expectedRevision || 0) + 1);
+  const nextBatch = next.batch ? restoreUploadBatch(next.batch, captured.userId, captured.projectUrl) : null;
   return withDatabase(factory, (database) => operate(database, 'readwrite', (store, finish, fail) => {
     const request = store.get(next.key);
     request.onsuccess = () => {
       try {
-        const previous = request.result === undefined ? null : decodeUploadDraft(scope, request.result);
+        assertCurrentDraft(isCurrent);
+        const previous = request.result === undefined ? null : decodeUploadDraft(captured, request.result);
         if ((previous?.revision ?? null) !== expectedRevision || (previous?.batch
-          && (!input.batch || !preservesUploadBatch(serializeUploadBatch(previous.batch), input.batch)))) {
+          && (!nextBatch || !preservesUploadBatch(serializeUploadBatch(previous.batch), nextBatch)))) {
           throw new UploadDraftConflictError();
         }
         store.put(next);
-        finish(decodeUploadDraft(scope, next));
+        finish(decodeUploadDraft(captured, next));
       } catch (error) { fail(error); }
     };
   }));
@@ -305,11 +319,28 @@ export async function clearCompletedUploadDraft(
   }));
 }
 
+async function sameDraftForm(
+  left: UploadDraftInput, right: UploadDraftInput, hashFile: (file: Blob) => Promise<string>,
+): Promise<boolean> {
+  if (left.description !== right.description || left.schoolName !== right.schoolName
+    || left.subjectName !== right.subjectName || left.files.length !== right.files.length
+    || left.titles.length !== right.titles.length || left.titles.some((title, index) => title !== right.titles[index])) return false;
+  for (let index = 0; index < left.files.length; index++) {
+    const file = left.files[index];
+    const other = right.files[index];
+    if (file.name !== other.name || file.type !== other.type || file.size !== other.size
+      || file.lastModified !== other.lastModified) return false;
+    if (file !== other && await hashFile(file) !== await hashFile(other)) return false;
+  }
+  return true;
+}
+
 // Les sauvegardes d'un même formulaire sont ordonnées. La révision est aussi
 // vérifiée DANS la transaction, afin qu'un ancien onglet n'écrase pas un autre.
 export function createUploadDraftPersistence(scope: UploadDraftScope, factory?: IDBFactory) {
   const captured = { ...scope };
   let revision: number | null = null;
+  let lastDraft: UploadDraft | null = null;
   let loaded = false;
   let queue: Promise<unknown> = Promise.resolve();
   const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
@@ -317,26 +348,68 @@ export function createUploadDraftPersistence(scope: UploadDraftScope, factory?: 
     queue = result.catch(() => undefined);
     return result;
   };
+  const remember = (draft: UploadDraft | null) => {
+    revision = draft?.revision ?? null;
+    lastDraft = draft && { ...draft, files: [...draft.files], titles: [...draft.titles],
+      batch: draft.batch ? restoreUploadBatch(serializeUploadBatch(draft.batch), captured.userId, captured.projectUrl) : null };
+    loaded = true;
+  };
   return {
     read: () => enqueue(async () => {
+      loaded = false;
       const draft = await readUploadDraft(captured, factory);
-      revision = draft?.revision ?? null;
-      loaded = true;
+      remember(draft);
       return draft;
     }),
-    save: (input: UploadDraftInput) => {
+    save: (input: UploadDraftInput, isCurrent: () => boolean = () => true) => {
       const snapshot = { ...input, files: [...input.files], titles: [...input.titles] };
       return enqueue(async () => {
         if (!loaded) throw new Error('Le brouillon précédent doit d’abord être vérifié.');
-        const saved = await saveUploadDraft(captured, snapshot, revision, factory);
-        revision = saved.revision;
+        const saved = await saveUploadDraft(captured, snapshot, revision, factory, isCurrent);
+        remember(saved);
         return saved;
+      });
+    },
+    retry: (input: UploadDraftInput, options: UploadDraftRetryOptions) => {
+      const snapshot = { ...input, files: [...input.files], titles: [...input.titles] };
+      return enqueue(async () => {
+        if (!loaded) throw new Error('Le brouillon précédent doit d’abord être vérifié.');
+        assertCurrentDraft(options.isCurrent);
+        const latest = await readUploadDraft(captured, factory);
+        assertCurrentDraft(options.isCurrent);
+        if (!snapshot.batch && latest?.batch) throw new UploadDraftConflictError();
+        if (latest && !latest.batch) {
+          // Une révision différente n'autorise pas à écraser les saisies d'un
+          // autre onglet. Accepter seulement notre dernière copie confirmée
+          // ou une copie identique aux saisies que nous voulons conserver.
+          const unchanged = !!lastDraft && !lastDraft.batch && await sameDraftForm(latest, lastDraft, options.hashFile);
+          if (!unchanged && !await sameDraftForm(latest, snapshot, options.hashFile)) throw new UploadDraftConflictError();
+        }
+        assertCurrentDraft(options.isCurrent);
+        const journal = options.readJournal();
+        const expectedJournal = journal ? serializeUploadBatch(journal) : null;
+        if (!snapshot.batch && journal) throw new UploadDraftConflictError();
+        const batch = await reconcileUploadDraftBatch(captured, latest, journal, snapshot.batch, options.hashFile);
+        const isCurrent = () => {
+          assertCurrentDraft(options.isCurrent);
+          const current = options.readJournal();
+          if ((current ? serializeUploadBatch(current) : null) !== expectedJournal) throw new UploadDraftConflictError();
+          return true;
+        };
+        const labels = batch?.entries.find((entry) => entry.request.schoolName && entry.request.subjectName)?.request;
+        const saved = await saveUploadDraft(captured, { ...snapshot, batch,
+          schoolName: labels?.schoolName || snapshot.schoolName, subjectName: labels?.subjectName || snapshot.subjectName,
+        }, latest?.revision ?? null, factory, isCurrent);
+        remember(saved);
+        // Seule la copie encore en mémoire peut garder une confirmation. La
+        // copie persistée reste une reprise à vérifier, jamais une preuve d'envoi.
+        return { ...saved, batch };
       });
     },
     clear: (batch: UploadBatch) => enqueue(async () => {
       if (!loaded) throw new Error('Le brouillon précédent doit d’abord être vérifié.');
       await clearCompletedUploadDraft(captured, batch, revision, factory);
-      revision = null;
+      remember(null);
     }),
   };
 }

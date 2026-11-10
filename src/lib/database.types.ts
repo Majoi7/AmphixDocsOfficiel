@@ -69,6 +69,8 @@ export interface Database {
       list_library_documents: {
         Args: { p_query?: string; p_trash?: boolean; p_pending?: boolean; p_offset?: number; p_ascending?: boolean };
         Returns: DocumentRow[];
+        // V6 renvoie SETOF documents : PostgREST expose aussi ses relations.
+        SetofOptions: { from: '*'; to: 'documents'; isOneToOne: false; isSetofReturn: true };
       };
       get_missing_document_previews: {
         Args: { p_after_id?: string | null };

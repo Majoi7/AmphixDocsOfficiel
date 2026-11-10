@@ -1,12 +1,12 @@
 export type DashboardView = 'home' | 'search' | 'explore';
-export type LibraryPanel = 'upload' | 'profile';
+export type LibraryPanel = 'upload' | 'profile' | 'leo';
 
 export function readLibraryLocation(search: string) {
   const params = new URLSearchParams(search);
   const requestedView = params.get('view');
   const view: DashboardView = requestedView === 'search' || requestedView === 'explore' ? requestedView : 'home';
   const requestedPanel = params.get('panel');
-  const panel: LibraryPanel | null = requestedPanel === 'upload' || requestedPanel === 'profile' ? requestedPanel : null;
+  const panel: LibraryPanel | null = requestedPanel === 'upload' || requestedPanel === 'profile' || requestedPanel === 'leo' ? requestedPanel : null;
   return {
     view,
     query: view === 'home' ? '' : params.get('q') || '',

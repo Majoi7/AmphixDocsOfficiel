@@ -43,7 +43,13 @@ export function useLibraryNavigation() {
       const params = new URLSearchParams(location.search);
       params.set('document', id);
       params.delete('panel');
-      void navigate(`${location.pathname}?${params}`, { replace: hasOverlay, state: overlayState });
+      // Garder l’entrée Léo dans l’historique : fermer le détail retrouve le
+      // panneau et sa recherche, sans relancer les trois appels.
+      const fromLeo = current.panel === 'leo';
+      void navigate(`${location.pathname}?${params}`, {
+        replace: hasOverlay && !fromLeo,
+        state: fromLeo ? { libraryPanelOrigin: href } : overlayState,
+      });
     },
     closePanel: closeOverlay,
     closeDocument: closeOverlay,

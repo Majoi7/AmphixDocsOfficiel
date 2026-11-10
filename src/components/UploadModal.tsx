@@ -18,7 +18,7 @@ import {
 import { getSupabaseClientState, subscribeSupabaseClient } from '../lib/supabase-config';
 import { userError } from '../lib/errors';
 import { prepareMobileUploadFile, UPLOAD_FILE_ACCEPT, UPLOAD_IMAGE_ACCEPT } from '../lib/upload-files';
-import { createUploadDraftPersistence, reconcileUploadDraftBatch, type UploadDraftInput } from '../lib/upload-draft';
+import { createUploadDraftPersistence, reconcileUploadDraftBatch, UploadDraftConflictError, type UploadDraftInput } from '../lib/upload-draft';
 import { useAuth } from '../context/AuthContext';
 import { useDialogAccessibility } from '../hooks/useDialogAccessibility';
 import { useDialogViewport } from '../hooks/useDialogViewport';
@@ -59,6 +59,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
   const [journalReady, setJournalReady] = useState(false);
   const [preparationLabel, setPreparationLabel] = useState<string | null>(null);
   const [draftStatus, setDraftStatus] = useState<'loading' | 'saving' | 'saved' | 'error'>('loading');
+  const [isRetryingDraft, setIsRetryingDraft] = useState(false);
   const [restoredDraft, setRestoredDraft] = useState(false);
   const [draftScope, setDraftScope] = useState<string | null>(null);
   const [draftReadAttempt, setDraftReadAttempt] = useState(0);
@@ -74,6 +75,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
   const draftRef = useRef<ReturnType<typeof createUploadDraftPersistence> | null>(null);
   const draftSnapshotRef = useRef<UploadDraftInput>({ files: [], titles: [], description: '', schoolName: '', subjectName: '', batch: null });
   const draftSequenceRef = useRef(0);
+  const draftRetryRef = useRef(false);
   const currentUserIdRef = useRef(user?.id);
   const isOpenRef = useRef(isOpen);
   currentUserIdRef.current = user?.id;
@@ -95,7 +97,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
   const uploadSuccess = !!batch && isUploadBatchComplete(batch);
   const scopeMatches = !!user && !!clientState.client && draftScope === `${clientState.generation}:${user.id}` && (!batch
     || (batch.userId === user.id && batch.projectUrl === clientState.config.url));
-  const fieldsLocked = isBusy || !!batch || !journalReady || !scopeMatches;
+  const fieldsLocked = isBusy || isRetryingDraft || !!batch || !journalReady || !scopeMatches;
   const legacyLabelsNeeded = !!batch && needsLegacyClassification(batch);
   const confirmedCount = batch?.entries.filter((entry) => entry.status === 'confirmed').length || 0;
   const suggestions = uploadSuggestions(scopeMatches ? documents : [], schoolName, scopeMatches ? preference : null);
@@ -122,6 +124,8 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
     setJournalReady(false);
     setDraftScope(null);
     setDraftStatus('loading');
+    draftRetryRef.current = false;
+    setIsRetryingDraft(false);
     setRestoredDraft(false);
     setLegacyChoicesConfirmed(false);
     draftRef.current = null;
@@ -202,33 +206,61 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
     return () => { if (lastOpeningRef.current === opening) lastOpeningRef.current = null; };
   }, [isOpen, user?.id, clientState.client, clientState.config.url, clientState.generation, draftReadAttempt, isBusy, publishBatch]);
 
-  const persistDraft = useCallback(async (snapshot: UploadDraftInput): Promise<void> => {
+  const persistDraft = useCallback(async (snapshot: UploadDraftInput, retry = false): Promise<void> => {
     const persistence = draftRef.current;
-    if (!persistence) throw new Error('Le brouillon n’est pas encore disponible.');
-    const sequence = ++draftSequenceRef.current;
     const userId = currentUserIdRef.current;
-    const generation = getSupabaseClientState().generation;
-    const isCurrent = () => mountedRef.current && draftRef.current === persistence && sequence === draftSequenceRef.current
-      && currentUserIdRef.current === userId && getSupabaseClientState().generation === generation;
-    if (mountedRef.current) setDraftStatus('saving');
+    const origin = getSupabaseClientState();
+    if (!persistence || !userId || !origin.client) throw new Error('Le brouillon n’est pas encore disponible.');
+    if (retry && draftRetryRef.current) return;
+    const scopeKey = `${origin.generation}:${userId}`;
+    const sequence = ++draftSequenceRef.current;
+    // La file FIFO doit pouvoir finir les saisies du même compte. Le numéro de
+    // séquence protège seulement leur retour à l'écran, pas leur persistance.
+    const isScopeCurrent = () => mountedRef.current && draftRef.current === persistence
+      && draftScopeKeyRef.current === scopeKey && currentUserIdRef.current === userId
+      && getSupabaseClientState().generation === origin.generation && getSupabaseClientState().client === origin.client;
+    const isCurrent = () => isScopeCurrent() && sequence === draftSequenceRef.current;
+    if (isCurrent()) {
+      setDraftStatus('saving');
+      if (retry) { draftRetryRef.current = true; setIsRetryingDraft(true); }
+    }
     try {
-      await persistence.save(snapshot);
-      if (isCurrent()) setDraftStatus('saved');
+      const saved = retry
+        ? await persistence.retry(snapshot, {
+          readJournal: () => readUploadJournal(journalStorage(), userId, origin.config.url),
+          hashFile: hashUploadFile, isCurrent: isScopeCurrent,
+        })
+        : await persistence.save(snapshot, isScopeCurrent);
+      if (!isCurrent()) return;
+      if (retry) {
+        // Conserver les saisies locales. Seuls le lot rapproché et une éventuelle
+        // classification historique déjà figée remplacent leur copie en mémoire.
+        draftSnapshotRef.current = { ...snapshot, batch: saved.batch,
+          schoolName: saved.schoolName, subjectName: saved.subjectName };
+        publishBatch(saved.batch);
+        setSchoolName(saved.schoolName);
+        setSubjectName(saved.subjectName);
+      }
+      setDraftStatus('saved');
     } catch (error) {
       if (isCurrent()) setDraftStatus('error');
       throw error;
+    } finally {
+      if (retry && isScopeCurrent()) { draftRetryRef.current = false; setIsRetryingDraft(false); }
     }
-  }, []);
-  const saveDraftWithFeedback = useCallback((snapshot: UploadDraftInput) => {
+  }, [publishBatch]);
+  const saveDraftWithFeedback = useCallback((snapshot: UploadDraftInput, retry = false): Promise<void> => {
     const persistence = draftRef.current;
-    const pending = persistDraft(snapshot);
+    const pending = persistDraft(snapshot, retry);
     const sequence = draftSequenceRef.current;
     const userId = currentUserIdRef.current;
     const generation = getSupabaseClientState().generation;
-    void pending.catch((error) => {
+    return pending.catch((error) => {
       if (mountedRef.current && draftRef.current === persistence && sequence === draftSequenceRef.current
         && currentUserIdRef.current === userId && getSupabaseClientState().generation === generation) {
-        setErrorMessage(userError(error, 'Le brouillon n’a pas pu être conservé. Vérifiez l’espace disponible puis réessayez avant de quitter cette page.'));
+        setErrorMessage(userError(error, error instanceof UploadDraftConflictError
+          ? 'Un autre dépôt est conservé sur cet appareil. Vos saisies restent dans cette page ; vérifiez les autres onglets puis réessayez sans effacer les données du site.'
+          : 'Le brouillon n’a pas pu être conservé. Vérifiez l’espace disponible puis réessayez avant de quitter cette page.'));
       }
     });
   }, [persistDraft]);
@@ -236,22 +268,29 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
   // Une suspension Android laisse au pire une sauvegarde non confirmée : le
   // statut reste honnête et le sélecteur attend cette confirmation.
   useEffect(() => {
-    if (!journalReady || !scopeMatches || isBusy || uploadSuccess) return;
-    saveDraftWithFeedback(draftSnapshotRef.current);
+    if (!journalReady || !scopeMatches || isBusy || draftRetryRef.current || uploadSuccess) return;
+    void saveDraftWithFeedback(draftSnapshotRef.current);
   }, [files, titles, description, schoolName, subjectName, journalReady, scopeMatches, isBusy, uploadSuccess, batch?.id, saveDraftWithFeedback]);
 
   useEffect(() => {
     const onPageHide = () => {
-      if (!journalReady || !scopeMatches || uploadSuccess || !draftRef.current) return;
+      const persistence = draftRef.current;
+      const userId = currentUserIdRef.current;
+      const origin = getSupabaseClientState();
+      if (!journalReady || !scopeMatches || uploadSuccess || !persistence || !userId || !origin.client) return;
+      const scopeKey = `${origin.generation}:${userId}`;
+      const isCurrent = () => mountedRef.current && draftRef.current === persistence
+        && draftScopeKeyRef.current === scopeKey && currentUserIdRef.current === userId
+        && getSupabaseClientState().generation === origin.generation && getSupabaseClientState().client === origin.client;
       // Best effort seulement : IndexedDB est déjà alimenté après chaque saisie.
-      void draftRef.current.save(draftSnapshotRef.current).catch(() => undefined);
+      void persistence.save(draftSnapshotRef.current, isCurrent).catch(() => undefined);
     };
     window.addEventListener('pagehide', onPageHide);
     return () => window.removeEventListener('pagehide', onPageHide);
   }, [journalReady, scopeMatches, uploadSuccess]);
 
   const handleFilesChosen = async (incoming: FileList | File[]) => {
-    if (busyRef.current || !journalReady || !scopeMatches || uploadSuccess || draftStatus !== 'saved') return;
+    if (busyRef.current || draftRetryRef.current || !journalReady || !scopeMatches || uploadSuccess || draftStatus !== 'saved') return;
     const selected = Array.from(incoming);
     if (!selected.length) return;
     setErrorMessage(null);
@@ -309,7 +348,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
   };
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    if (busyRef.current || !journalReady || !user || !scopeMatches) return;
+    if (busyRef.current || draftRetryRef.current || !journalReady || !user || !scopeMatches || (!uploadSuccess && draftStatus !== 'saved')) return;
     if (uploadSuccess) {
       // Actualiser l'affichage ou finir le nettoyage ne recrée pas le brouillon
       // d'un lot dont la confirmation a déjà été reçue.
@@ -413,7 +452,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
         }
       }
     } catch (error) {
-      if (isCurrent()) setErrorMessage(userError(error, 'L’envoi n’a pas pu être terminé. Retrouvez une connexion puis réessayez ; vos saisies et les fichiers déjà envoyés sont conservés.'));
+      if (isCurrent()) setErrorMessage(userError(error, 'L’envoi n’a pas pu être terminé. Les fichiers déjà reçus ne seront pas renvoyés. Réessayez avant de quitter cette page ; les dernières saisies ne sont conservées sur l’appareil qu’après confirmation du brouillon.'));
     }
     finally {
       busyRef.current = false;
@@ -427,7 +466,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
     event.currentTarget.value = '';
     void handleFilesChosen(selected);
   };
-  const pickerLocked = isBusy || !journalReady || !scopeMatches || uploadSuccess
+  const pickerLocked = isBusy || isRetryingDraft || !journalReady || !scopeMatches || uploadSuccess
     || draftStatus !== 'saved' || (!!batch && !canRetryUploadBatch(batch));
 
   return (
@@ -460,11 +499,12 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
               <div className="min-h-0 space-y-4 overflow-y-auto overscroll-contain px-4 py-4 md:px-6">
                 {errorMessage && <div role="alert" className="space-y-2 rounded-2xl bg-[#e9e3da] p-3 text-sm text-[#b0245e]">
                   <p className="flex items-start gap-2"><AlertCircle aria-hidden="true" size={18} className="mt-0.5 shrink-0" /><span className="min-w-0 break-words">{errorMessage}</span></p>
-                  {(!journalReady || draftStatus === 'error') && <button type="button" disabled={isBusy} className={`${buttonClass} bg-white/65 text-[#141414]`}
+                  {(!journalReady || draftStatus === 'error') && <button type="button" disabled={isBusy || isRetryingDraft || draftStatus === 'saving'} className={`${buttonClass} bg-white/65 text-[#141414]`}
                     onClick={() => {
+                      if (busyRef.current || draftRetryRef.current || draftStatus === 'saving') return;
                       setErrorMessage(null);
                       if (journalReady && scopeMatches) {
-                        saveDraftWithFeedback(draftSnapshotRef.current);
+                        void saveDraftWithFeedback(draftSnapshotRef.current, true);
                       } else {
                         lastOpeningRef.current = null;
                         draftScopeKeyRef.current = null;
@@ -546,7 +586,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                   </fieldset>
                 )}
                 {(!batch || legacyLabelsNeeded) && (
-                  <fieldset disabled={isBusy || !journalReady || !scopeMatches} className="min-w-0 space-y-3">
+                  <fieldset disabled={isBusy || isRetryingDraft || !journalReady || !scopeMatches} className="min-w-0 space-y-3">
                     <legend className="sr-only">École et matière</legend>
                     {legacyLabelsNeeded && <p className="rounded-2xl bg-[#ffd23f]/20 p-3 text-sm">Vous pouvez vérifier les fichiers déjà reçus. Pour terminer les autres, choisissez leur école et leur matière.</p>}
                     <div>

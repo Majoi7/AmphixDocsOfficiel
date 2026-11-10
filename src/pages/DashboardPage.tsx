@@ -17,6 +17,9 @@ import { useLibraryNavigation } from '../hooks/useLibraryNavigation';
 import { useDocumentThumbnails } from '../hooks/useDocumentThumbnails';
 import type { DashboardView } from '../lib/library-navigation';
 import { MobileDashboardHero } from '../components/mobile/MobileDashboardHero';
+import { LeoLauncher } from '../components/LeoLauncher';
+import { LeoPanel } from '../components/LeoPanel';
+import { useLeoSession } from '../hooks/useLeoSession';
 
 type LibraryController = ReturnType<typeof createDashboardLibraryController>;
 const buttonClass = 'inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#4a6cf0] disabled:cursor-not-allowed disabled:opacity-50';
@@ -26,6 +29,8 @@ export function DashboardPage() {
   const navigation = useLibraryNavigation();
   const { view, query: searchQuery, showTrash, setQuery: setSearchQuery, setShowTrash } = navigation;
   const isUploadOpen = navigation.panel === 'upload';
+  const isLeoOpen = navigation.panel === 'leo';
+  const { session: leoSession, snapshot: leoSnapshot } = useLeoSession(isLeoOpen);
   const reducedMotion = useReducedMotion();
   const { client, generation, config: { url: projectUrl } } = useSyncExternalStore(subscribeSupabaseClient, getSupabaseClientState, getSupabaseClientState);
   const userId = user?.id || '';
@@ -105,6 +110,7 @@ export function DashboardPage() {
 
   const selectView = (next: DashboardView) => navigation.selectView(next);
   const openUpload = () => navigation.openPanel('upload');
+  const openLeo = () => navigation.openPanel('leo');
   const checkLibraryScope = () => {
     if (!library.isCurrent()) throw new Error('Votre session a changé. Actualisez avant de réessayer.');
   };
@@ -112,11 +118,16 @@ export function DashboardPage() {
     checkLibraryScope();
     await updateDocumentMetadata(id, title, description, userId);
     if (!library.updateDocumentMetadata(id, title, description)) checkLibraryScope();
+    // Le détail peut provenir de Léo sans être dans la page de bibliothèque.
+    // Mettre à jour son historique seulement après la confirmation SQL.
+    const leoDocument = leoSession.getSnapshot().entries.flatMap((entry) => [...entry.documents, ...entry.candidates]).find((document) => document.id === id);
+    if (leoDocument) leoSession.updateDocument({ ...leoDocument, title: title.trim(), description: description.trim() || null });
   };
   const handleTrashDocument = async (id: string, deleted: boolean) => {
     checkLibraryScope();
     const state = await setDocumentTrash(id, deleted, userId);
     if (!library.setDocumentTrash(state)) checkLibraryScope();
+    if (state.deleted_at !== null) leoSession.removeDocument(id);
     setActionNotice(deleted ? 'Fichier placé dans la corbeille. Retrouvez-le dans Explorer → Corbeille.' : 'Fichier restauré. Son statut d’approbation est conservé.');
   };
   const handleDocumentUploaded = (report: UploadBatchReport) => {
@@ -167,8 +178,8 @@ export function DashboardPage() {
         </div>}
         {actionNotice && <p role="status" className="mb-4 rounded-2xl bg-emerald-50 p-3 text-sm text-emerald-800">{actionNotice}</p>}
         {view === 'home' ? <>
-          <MobileDashboardHero userFirstName={displayName.split(' ')[0]} searchQuery={searchQuery} onSearchChange={setSearchQuery} onFocusSearch={() => selectView('search')} onOpenUpload={openUpload} />
-          <div className="hidden flex-col md:flex"><SearchHero value={searchQuery} onChange={setSearchQuery} onFocusSearch={() => selectView('search')} onOpenUpload={openUpload} /></div>
+          <MobileDashboardHero userFirstName={displayName.split(' ')[0]} searchQuery={searchQuery} onSearchChange={setSearchQuery} onFocusSearch={() => selectView('search')} onOpenUpload={openUpload} onOpenLeo={openLeo} />
+          <div className="hidden flex-col md:flex"><SearchHero value={searchQuery} onChange={setSearchQuery} onFocusSearch={() => selectView('search')} onOpenUpload={openUpload} onOpenLeo={openLeo} /></div>
         </> : <div className="mb-5 space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h1 ref={resultsHeadingRef} tabIndex={-1} className="min-w-0 rounded-lg text-2xl font-extrabold tracking-tight focus-visible:outline-2 focus-visible:outline-[#4a6cf0]">{view === 'search' ? 'Recherche' : showTrash ? 'Corbeille' : 'Explorer les fichiers'}</h1>
@@ -178,8 +189,9 @@ export function DashboardPage() {
             <label htmlFor="library-search" className="sr-only">Rechercher par titre, école, matière ou nom de fichier</label>
             <Search aria-hidden="true" size={20} className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#141414]/50" />
             <input ref={searchInputRef} id="library-search" type="search" value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Titre, école, matière…"
-              className="min-h-14 w-full min-w-0 rounded-2xl border-2 border-[#141414] bg-white py-3 pr-14 pl-12 text-base outline-none focus:border-[#4a6cf0] focus:ring-4 focus:ring-[#4a6cf0]/15" />
-            {searchQuery && <button type="button" aria-label="Effacer la recherche" onClick={() => setSearchQuery('')} className="absolute top-1/2 right-1 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full hover:bg-[#f1ece4] focus-visible:outline-2 focus-visible:outline-[#4a6cf0]"><X aria-hidden="true" size={20} /></button>}
+              className="min-h-14 w-full min-w-0 rounded-2xl border-2 border-[#141414] bg-white py-3 pr-26 pl-12 text-base outline-none focus:border-[#4a6cf0] focus:ring-4 focus:ring-[#4a6cf0]/15" />
+            {searchQuery && <button type="button" aria-label="Effacer la recherche" onClick={() => setSearchQuery('')} className="absolute top-1/2 right-13 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full hover:bg-[#f1ece4] focus-visible:outline-2 focus-visible:outline-[#4a6cf0]"><X aria-hidden="true" size={20} /></button>}
+            <span className="absolute top-1/2 right-1 -translate-y-1/2"><LeoLauncher onClick={openLeo} expanded={isLeoOpen} /></span>
           </div>
           {view === 'explore' && <div role="group" aria-label="Afficher les fichiers actifs ou la corbeille" className="flex flex-wrap gap-2">
             <button type="button" aria-pressed={!showTrash} onClick={() => setShowTrash(false)} className={`${buttonClass} ${!showTrash ? 'bg-[#141414] text-white' : 'bg-white'}`}>Fichiers</button>
@@ -202,6 +214,7 @@ export function DashboardPage() {
         </section> : <p className="rounded-3xl bg-white/60 p-5 text-sm text-[#141414]/70">Saisissez votre recherche, ou choisissez Explorer pour voir les fichiers accessibles.</p>}
       </main>
       <UploadModal isOpen={isUploadOpen} onClose={navigation.closePanel} documents={documents} onSuccess={handleDocumentUploaded} />
+      {isLeoOpen && <LeoPanel session={leoSession} snapshot={leoSnapshot} onClose={navigation.closePanel} onOpenDocument={navigation.openDocument} />}
       {navigation.documentId && <DocumentDetails documentId={navigation.documentId}
         thumbnailUrl={selectedDocument?.thumbnail_path ? previews.urls[selectedDocument.thumbnail_path] : undefined}
         onClose={navigation.closeDocument} onUpdate={handleUpdateDocument} onTrash={handleTrashDocument} />}

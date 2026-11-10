@@ -1,6 +1,7 @@
 import { useId } from 'react';
 import { motion, useReducedMotion } from 'motion/react';
 import { Plus, Search, Sparkles } from 'lucide-react';
+import { LeoLauncher } from '../LeoLauncher';
 
 interface MobileDashboardHeroProps {
   userFirstName: string;
@@ -8,9 +9,10 @@ interface MobileDashboardHeroProps {
   onSearchChange: (query: string) => void;
   onFocusSearch: () => void;
   onOpenUpload: () => void;
+  onOpenLeo: () => void;
 }
 
-export function MobileDashboardHero({ userFirstName, searchQuery, onSearchChange, onFocusSearch, onOpenUpload }: MobileDashboardHeroProps) {
+export function MobileDashboardHero({ userFirstName, searchQuery, onSearchChange, onFocusSearch, onOpenUpload, onOpenLeo }: MobileDashboardHeroProps) {
   const reducedMotion = useReducedMotion();
   const id = useId();
   return <motion.section initial={reducedMotion ? false : { opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
@@ -24,7 +26,8 @@ export function MobileDashboardHero({ userFirstName, searchQuery, onSearchChange
       <label htmlFor={id} className="sr-only">Rechercher un fichier, une école ou une matière</label>
       <Search aria-hidden="true" size={22} className="pointer-events-none absolute top-1/2 left-4 -translate-y-1/2 text-[#141414]/50" />
       <input id={id} type="search" value={searchQuery} onFocus={onFocusSearch} onChange={(event) => onSearchChange(event.target.value)} placeholder="Titre, école, matière…"
-        className="min-h-16 w-full min-w-0 rounded-2xl border-2 border-[#141414] bg-white py-4 pr-3 pl-12 text-base shadow-[3px_3px_0px_#141414] outline-none focus:border-[#4a6cf0] focus:ring-4 focus:ring-[#4a6cf0]/20" />
+        className="min-h-16 w-full min-w-0 rounded-2xl border-2 border-[#141414] bg-white py-4 pr-16 pl-12 text-base shadow-[3px_3px_0px_#141414] outline-none focus:border-[#4a6cf0] focus:ring-4 focus:ring-[#4a6cf0]/20" />
+      <span className="absolute top-1/2 right-1.5 -translate-y-1/2"><LeoLauncher onClick={onOpenLeo} /></span>
     </div>
     <motion.button type="button" onClick={onOpenUpload} whileTap={reducedMotion ? undefined : { scale: 0.98 }}
       className="flex min-h-14 w-full cursor-pointer items-center justify-center gap-2 rounded-full border-2 border-[#141414] bg-[#ff6a2b] px-4 py-3 text-base font-extrabold shadow-[3px_3px_0px_#141414] hover:bg-[#ff8a4c] focus-visible:outline-2 focus-visible:outline-offset-3 focus-visible:outline-[#4a6cf0]">
