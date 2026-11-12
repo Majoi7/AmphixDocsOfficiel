@@ -85,11 +85,9 @@ export function DocumentFileViewer({ document: item, actorId, generation, onComp
         : <ImageDocumentViewer source={blob} title={item.title} onError={() => setError(previewError)} />
       : <div className="mx-auto w-full max-w-xs"><DocumentPreview document={item} large /></div>}
     {item.deleted_at !== null && <p className="text-sm text-[#141414]/65">Aucun aperçu pour un fichier dans la corbeille.</p>}
-    {link.url ? <a href={link.url} download={item.file_name} target="_blank" rel="noopener noreferrer" className={`${buttonClass} w-full bg-[#ff6a2b]`}><Download size={18} aria-hidden="true" />Télécharger</a>
-      : <button type="button" disabled={disabled || link.isPreparing} onClick={() => void link.prepareLink()} className={`${buttonClass} w-full bg-[#ff6a2b]`}>
-        {link.isPreparing ? <Loader2 size={18} aria-hidden="true" className="animate-spin motion-reduce:animate-none" /> : <Download size={18} aria-hidden="true" />}{link.isPreparing ? 'Préparation…' : 'Télécharger'}
-      </button>}
-    {link.url && <p className="text-center text-xs text-[#141414]/65">Lien prêt : touche Télécharger pour enregistrer le fichier.</p>}
+    <button type="button" disabled={disabled || link.isPreparing} aria-busy={link.isPreparing} onClick={() => void link.download()} className={`${buttonClass} w-full bg-[#ff6a2b]`}>
+      {link.isPreparing ? <Loader2 size={18} aria-hidden="true" className="animate-spin motion-reduce:animate-none" /> : <Download size={18} aria-hidden="true" />}{link.isPreparing ? 'Préparation…' : 'Télécharger'}
+    </button>
     {link.linkError && <p role="alert" className="text-sm text-red-800">{link.linkError}</p>}
   </section>;
 }

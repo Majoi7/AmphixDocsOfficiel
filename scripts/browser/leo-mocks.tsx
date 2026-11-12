@@ -130,7 +130,15 @@ export async function getDocumentThumbnailUrls(paths: readonly string[], actorId
   if (actorId !== user?.id || previewFailure) throw new Error('Aperçus fictifs indisponibles.');
   return Object.fromEntries(paths.map((path) => [path, '/fixture-preview.svg']));
 }
-export async function getDocumentSignedUrl() { return '/fixture-file.pdf'; }
+const signedLinkCalls: { filePath: string; downloadName?: string }[] = [];
+let downloadFailure = false;
+export async function getDocumentSignedUrl(filePath: string, downloadName?: string) {
+  signedLinkCalls.push({ filePath, downloadName });
+  // La signature peut arriver après fermeture ou changement de compte.
+  await gates.get('download')?.promise;
+  if (downloadFailure) throw new Error('SIGNATURE_SECRET_SHOULD_NEVER_RENDER');
+  return '/fixture-file.pdf';
+}
 
 // Les octets et le décodage sont fictifs : ce banc vérifie les composants et
 // leurs cycles de vie, pas pdf.js, les droits Storage ou le contenu d'un PDF.
@@ -303,6 +311,7 @@ export const fixtureApi = {
   libraryCalls: () => clone(libraryCalls), targets: () => clone(targetCalls), thumbnails: () => clone(thumbnailCalls),
   mutations: () => clone(mutationCalls), document: (id: string) => clone(documents.get(id)),
   sources: () => clone(sourceCalls), completions: () => clone(completionCalls), pdf: () => clone(pdfStats),
+  signedLinks: () => clone(signedLinkCalls), failDownload: (fail: boolean) => { downloadFailure = fail; },
   patchDocument: (id: string, fields: Partial<Pick<DocumentItem, 'thumbnail_path' | 'page_count' | 'file_type' | 'file_name' | 'deleted_at'>>) => {
     const document = documents.get(id);
     if (!document) throw new Error('Document fictif absent.');

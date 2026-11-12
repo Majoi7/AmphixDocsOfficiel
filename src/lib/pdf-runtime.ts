@@ -34,7 +34,7 @@ export async function openPdf(blob: Blob, signal?: AbortSignal): Promise<OpenPdf
   };
   const abort = () => { void dispose().catch(() => undefined); };
   task = pdf.getDocument({
-    data: new Uint8Array(buffer), isEvalSupported: false, enableXfa: false,
+    data: new Uint8Array(buffer), enableXfa: false,
     useSystemFonts: true, maxImageSize: 16_000_000,
   });
   // Pas de mot de passe collecté ou mémorisé : téléchargement toujours proposé.

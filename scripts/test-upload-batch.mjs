@@ -275,6 +275,135 @@ test('une exception non typée reste indéterminée, pas un succès', async () =
   assert.equal(library.isUploadBatchComplete(result), false);
 });
 
+test('la progression décrit les octets, pas une confirmation de document à 100 %', async () => {
+  const entry = prepared();
+  const changes = [];
+  const reports = [];
+  const result = await library.runUploadBatch(batch([entry]), dependencies({
+    uploadDocument: async (request, file, stage, project, mode, progress) => {
+      assert.equal(file, entry.file);
+      assert.equal(project, projectUrl);
+      assert.equal(mode, 'initial');
+      stage('transfert');
+      for (const uploadedBytes of [1, request.fileSize, request.fileSize + 10]) {
+        progress({ uploadedBytes, totalBytes: request.fileSize, transport: 'standard' });
+        const working = changes.at(-1).entries[0];
+        assert.equal(working.status, 'working');
+        assert.equal(working.document, null);
+        assert.equal(working.progress.uploadedBytes, Math.min(uploadedBytes, request.fileSize));
+        assert.equal(reports.length, 0, 'Les octets seuls ne publient aucun succès.');
+      }
+      stage('enregistrement');
+      assert.equal(changes.at(-1).entries[0].status, 'working');
+      return documentFrom(request);
+    },
+  }), (value) => changes.push(value), (report) => reports.push(report));
+  assert.equal(result.entries[0].status, 'confirmed');
+  assert.equal(result.entries[0].progress.totalBytes, entry.file.size);
+  assert.equal(result.entries[0].progress.transport, 'standard');
+  assert.equal(reports.at(-1).complete, true);
+  assert.equal(reports.at(-1).documents.length, 1);
+});
+
+test('les compteurs invalides et les callbacks après confirmation sont ignorés', async () => {
+  const changes = [];
+  let publishProgress;
+  const result = await library.runUploadBatch(batch(), dependencies({
+    uploadDocument: async (request, _file, stage, _project, _mode, progress) => {
+      publishProgress = progress;
+      stage('transfert');
+      for (const invalid of [
+        { uploadedBytes: -1, totalBytes: request.fileSize, transport: 'standard' },
+        { uploadedBytes: NaN, totalBytes: request.fileSize, transport: 'standard' },
+        { uploadedBytes: Infinity, totalBytes: request.fileSize, transport: 'tus' },
+        { uploadedBytes: 1, totalBytes: request.fileSize + 1, transport: 'standard' },
+        { uploadedBytes: 1, totalBytes: request.fileSize, transport: 'minuteur' },
+      ]) {
+        const count = changes.length;
+        progress(invalid);
+        assert.equal(changes.length, count);
+        assert.equal(changes.at(-1).entries[0].progress, null);
+      }
+      progress({ uploadedBytes: 2, totalBytes: request.fileSize, transport: 'tus' });
+      return documentFrom(request);
+    },
+  }), (value) => changes.push(value), noChange);
+  assert.deepEqual(result.entries[0].progress, { uploadedBytes: 2, totalBytes: 4, transport: 'tus' });
+  const count = changes.length;
+  publishProgress({ uploadedBytes: 4, totalBytes: 4, transport: 'tus' });
+  assert.equal(changes.length, count);
+  assert.equal(result.entries[0].progress.uploadedBytes, 2);
+});
+
+test('un compteur d’un ancien compte ne produit aucune mise à jour ni notification', async () => {
+  let current = true;
+  const changes = [];
+  const reports = [];
+  const result = await library.runUploadBatch(batch(), dependencies({
+    isCurrent: () => current,
+    uploadDocument: async (request, _file, stage, _project, _mode, progress) => {
+      stage('transfert');
+      progress({ uploadedBytes: 1, totalBytes: request.fileSize, transport: 'standard' });
+      const count = changes.length;
+      current = false;
+      progress({ uploadedBytes: request.fileSize, totalBytes: request.fileSize, transport: 'standard' });
+      assert.equal(changes.length, count);
+      return documentFrom(request);
+    },
+  }), (value) => changes.push(value), (report) => reports.push(report));
+  assert.equal(result.entries[0].failureKind, 'scope');
+  assert.equal(result.entries[0].document, null);
+  assert.equal(result.entries[0].progress.uploadedBytes, 1);
+  assert.equal(reports.length, 0);
+});
+
+test('la reprise remet le compteur à zéro sans rejouer les originaux confirmés', async () => {
+  const entries = [prepared(1), prepared(2)];
+  const first = await library.runUploadBatch(batch(entries), dependencies({
+    uploadDocument: async (request, _file, stage, _project, _mode, progress) => {
+      stage('transfert');
+      progress({ uploadedBytes: request.fileSize, totalBytes: request.fileSize, transport: 'standard' });
+      if (request.identity.id === entries[1].request.identity.id) throw failure('retryable');
+      return documentFrom(request);
+    },
+  }), noChange, noChange);
+  assert.deepEqual(first.entries.map((entry) => entry.status), ['confirmed', 'error']);
+  assert.equal(first.entries[1].progress.uploadedBytes, 4);
+  const changes = [];
+  const calls = [];
+  const retried = await library.runUploadBatch(first, dependencies({
+    uploadDocument: async (request, _file, _stage, _project, mode) => {
+      calls.push(request.identity.id);
+      assert.equal(mode, 'resume');
+      assert.equal(changes.at(-1).entries[1].progress, null);
+      assert.equal(changes.at(-1).entries[0].status, 'confirmed');
+      return documentFrom(request);
+    },
+  }), (value) => changes.push(value), noChange);
+  assert.deepEqual(calls, [entries[1].request.identity.id]);
+  assert.equal(retried.entries[1].progress, null);
+  assert.equal(first.entries[1].progress.uploadedBytes, 4, 'Le lot d’origine reste immuable.');
+});
+
+test('la trace persistée ne contient aucun compteur et la restauration ne suppose pas le transfert', async () => {
+  const first = await library.runUploadBatch(batch(), dependencies({
+    uploadDocument: async (request, _file, stage, _project, _mode, progress) => {
+      stage('transfert');
+      progress({ uploadedBytes: request.fileSize, totalBytes: request.fileSize, transport: 'tus' });
+      return documentFrom(request);
+    },
+  }), noChange, noChange);
+  const raw = library.serializeUploadBatch(first);
+  assert.doesNotMatch(raw, /progress|uploadedBytes|totalBytes|transport/);
+  const store = memoryStorage();
+  library.saveUploadJournal(store, first);
+  const restored = library.readUploadJournal(store, userId, projectUrl);
+  assert.equal(restored.entries[0].progress, null);
+  assert.equal(restored.entries[0].document, null);
+  assert.equal(restored.entries[0].status, 'pending');
+  assert.deepEqual(restored.entries[0].request, first.entries[0].request);
+});
+
 // Les scénarios de création/conflit de dossier ont été retirés :
 // le contrat V5 ne crée plus de dossiers.
 

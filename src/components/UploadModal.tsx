@@ -546,10 +546,10 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                       <p className="text-xs text-[#141414]/65">PDF, images, Word, PowerPoint et texte · 20 Mo par fichier</p>
                       <div>
                         <input id={`${pickerId}-files`} type="file" multiple accept={UPLOAD_FILE_ACCEPT} className="peer sr-only"
-                          aria-label="Choisir un fichier" onChange={chooseInput} disabled={pickerLocked} />
+                          aria-label={files.length ? 'Changer la sélection de fichiers' : 'Choisir des fichiers'} onChange={chooseInput} disabled={pickerLocked} />
                         <label htmlFor={`${pickerId}-files`} aria-disabled={pickerLocked}
                           className={`${buttonClass} w-full touch-manipulation border border-[#141414]/20 bg-white peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[#ff6a2b] peer-disabled:cursor-not-allowed peer-disabled:opacity-50`}>
-                          {files.length ? 'Changer la sélection' : 'Choisir un fichier'}
+                          <FileText aria-hidden="true" size={18} className="shrink-0" />Fichiers
                         </label>
                       </div>
                       <div className="grid grid-cols-2 gap-2 md:hidden">
@@ -596,6 +596,15 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                       <input id="upload-school" type="text" list="upload-schools" autoComplete="off" maxLength={120} required={!batch || legacyChoicesConfirmed} value={schoolName}
                         onChange={(event) => setSchoolName(event.target.value)} aria-describedby="upload-label-help" className={fieldClass} placeholder="Nom de votre école" />
                       <datalist id="upload-schools">{suggestions.schools.map((name) => <option key={name} value={name} />)}</datalist>
+                      <div role="group" aria-label="Écoles proposées" className="mt-2 flex flex-wrap gap-2">
+                        {['ENEAM', 'IFRI'].map((school) => {
+                          const selected = schoolName.trim().toUpperCase() === school;
+                          return <button key={school} type="button" aria-pressed={selected} onClick={() => setSchoolName(school)}
+                            className={`${buttonClass} ${selected ? 'bg-[#ff6a2b] text-[#141414]' : 'bg-white/65 text-[#141414]/75 hover:bg-white'}`}>
+                            {school}
+                          </button>;
+                        })}
+                      </div>
                     </div>
                     <div>
                       <label htmlFor="upload-subject" className="mb-1.5 block text-sm font-semibold">Matière</label>
@@ -638,6 +647,17 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                             <p className="break-all text-xs text-[#141414]/65">{entry.request.fileName} · {formatFileSize(entry.request.fileSize)}</p>
                             {entry.request.schoolName && <p className="mt-1 break-words text-xs text-[#141414]/65">{entry.request.schoolName} · {entry.request.subjectName}</p>}
                             <p className="mt-1 text-xs text-[#141414]/75">{entry.status === 'pending' ? 'En attente de vérification' : UPLOAD_STAGE_LABELS[entry.stage]}</p>
+                            {entry.progress && entry.status === 'working' && entry.stage === 'transfert' && entry.progress.totalBytes > 0 && (
+                              <div className="mt-2 space-y-1">
+                                <progress max={entry.progress.totalBytes} value={entry.progress.uploadedBytes}
+                                  aria-label={`Transfert de ${entry.request.fileName}`}
+                                  className="block h-2 w-full overflow-hidden rounded-full accent-[#ff6a2b]" />
+                                <p className="text-xs text-[#141414]/65">
+                                  {Math.floor(entry.progress.uploadedBytes / entry.progress.totalBytes * 100)} % transférés · {formatFileSize(entry.progress.uploadedBytes)} sur {formatFileSize(entry.progress.totalBytes)}
+                                </p>
+                                {entry.progress.uploadedBytes === entry.progress.totalBytes && <p className="text-xs text-[#141414]/65">En attente de confirmation du stockage.</p>}
+                              </div>
+                            )}
                             {entry.document && <p className="mt-1 text-xs font-semibold">{entry.document.deleted_at ? 'Dans la corbeille' : STATUS_CONFIG[entry.document.status].label}</p>}
                             {entry.error && <p role="alert" className="mt-2 break-words text-sm text-[#b0245e]">{entry.error}</p>}
                             {entry.failureKind === 'conflict' && <p className="mt-1 text-xs text-[#b0245e]">Demandez de l’aide à une personne administratrice avant de renvoyer ce fichier.</p>}

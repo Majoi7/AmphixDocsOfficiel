@@ -55,7 +55,7 @@ function isolatedImports() {
     load(id) {
       if (id !== facadeId) return;
       return `export { MAX_DOCUMENT_SIZE, STATUS_CONFIG, formatFileSize, hashUploadFile, prepareUploadDocument, validateClassification } from ${JSON.stringify(sourcePath)};
-export { fixtureUpload as resumeUserDocument } from ${JSON.stringify(fixturePath)};`;
+export { fixtureUpload as resumeUserDocument, fixtureCompletePreview as completeDocumentPreview } from ${JSON.stringify(fixturePath)};`;
     },
     generateBundle() {
       assert.ok(replacedTransport, 'Le vrai formulaire doit utiliser le transport fictif de ce build seulement.');
@@ -369,14 +369,17 @@ test('sélecteurs natifs, cible tactile, focus confiné et restauration à 320 p
     const label = document.querySelector('label[for="' + input.id + '"]');
     const rect = label.getBoundingClientRect();
     const style = getComputedStyle(input);
-    return { id: input.id, width: rect.width, height: rect.height, display: style.display,
+    return { id: input.id, label: label.textContent.trim(), width: rect.width, height: rect.height, display: style.display,
       accept: input.accept, capture: input.getAttribute('capture'), touch: getComputedStyle(label).touchAction };
   })`);
   assert.equal(pickers.length, 3);
+  assert.deepEqual(pickers.map((picker) => picker.label), ['Fichiers', 'Galerie', 'Prendre une photo']);
   for (const picker of pickers) {
     assert.ok(picker.width >= 44 && picker.height >= 44, `Cible tactile insuffisante : ${picker.id}`);
     assert.notEqual(picker.display, 'none');
     assert.match(picker.touch, /manipulation/);
+    assert.ok(picker.accept.split(',').includes('.heic'));
+    assert.ok(picker.accept.split(',').includes('.heif'));
   }
   assert.match(pickers.find((picker) => picker.id.endsWith('-files')).accept, /\.pdf/);
   assert.equal(pickers.find((picker) => picker.id.endsWith('-camera')).capture, 'environment');
@@ -598,6 +601,38 @@ test('lecture retardée puis fermeture/réouverture : aucune réponse de l’anc
   await api('releaseOpen');
   await saved({ schoolName: 'IFRI' });
   assert.equal(await evaluate('document.querySelector("#upload-school").value'), 'IFRI');
+  assert.equal((await api('calls')).length, 0);
+});
+
+test('pastilles ENEAM/IFRI accessibles, choix conservé après rechargement et saisie libre', async () => {
+  await form(16, 'cours.pdf', 320);
+  const group = '[role="group"][aria-label="Écoles proposées"]';
+  const chips = () => evaluate(`Array.from(document.querySelectorAll(${JSON.stringify(`${group} button`)})).map((button) => {
+    const rect = button.getBoundingClientRect();
+    return { label: button.textContent.trim(), pressed: button.getAttribute('aria-pressed'),
+      type: button.type, width: rect.width, height: rect.height };
+  })`);
+  const initial = await chips();
+  assert.deepEqual(initial.map((chip) => chip.label), ['ENEAM', 'IFRI']);
+  assert.deepEqual(initial.map((chip) => chip.pressed), ['false', 'false']);
+  for (const chip of initial) {
+    assert.equal(chip.type, 'button');
+    assert.ok(chip.width >= 44 && chip.height >= 44, `Pastille trop petite : ${chip.label}`);
+  }
+  for (const [index, school] of ['ENEAM', 'IFRI'].entries()) {
+    await click(`${group} button:nth-of-type(${index + 1})`);
+    await saved({ schoolName: school, subjectName: 'Mathématiques' });
+    assert.equal(await evaluate('document.querySelector("#upload-school").value'), school);
+    assert.deepEqual((await chips()).map((chip) => chip.pressed), index === 0 ? ['true', 'false'] : ['false', 'true']);
+    assert.equal((await api('calls')).length, 0, 'Choisir une école ne doit pas envoyer le formulaire.');
+  }
+  await reload();
+  await open();
+  assert.equal(await evaluate('document.querySelector("#upload-school").value'), 'IFRI');
+  assert.deepEqual((await chips()).map((chip) => chip.pressed), ['false', 'true']);
+  await fill('#upload-school', 'Autre école');
+  await saved({ schoolName: 'Autre école' });
+  assert.deepEqual((await chips()).map((chip) => chip.pressed), ['false', 'false']);
   assert.equal((await api('calls')).length, 0);
 });
 

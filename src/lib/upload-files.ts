@@ -105,12 +105,20 @@ const browserImageTools: ImagePreparationTools = {
 // Une reprise réutilise exactement les octets du brouillon : pas de recompression.
 export async function prepareMobileUploadFile(file: File, tools: ImagePreparationTools = browserImageTools): Promise<File> {
   const normalized = normalizeUploadFile(file);
-  if (!normalized.type.startsWith('image/') || isHeicOrHeif(normalized) || normalized.size <= IMAGE_COMPRESSION_THRESHOLD) return normalized;
-  const image = await tools.decode(normalized);
+  if (!normalized.type.startsWith('image/') || normalized.size <= IMAGE_COMPRESSION_THRESHOLD) return normalized;
+  let image: DecodedImage | undefined;
   try {
+    image = await tools.decode(normalized);
     const blob = await tools.encode(image, imageOutputDimensions(image.width, image.height), IMAGE_JPEG_QUALITY);
     if (blob.type !== 'image/jpeg' || blob.size === 0 || blob.size > MAX_UPLOAD_FILE_SIZE) throw new Error('Cette image ne peut pas être préparée. Choisissez un JPEG plus léger.');
+    // Ne jamais remplacer un original par une conversion plus lourde.
+    if (blob.size >= normalized.size) return normalized;
     const stem = normalized.name.replace(/\.[^.]+$/, '') || 'photo';
     return new File([blob], `${stem}.jpg`, { type: 'image/jpeg', lastModified: normalized.lastModified });
-  } finally { image.release(); }
+  } catch (error) {
+    // HEIC/HEIF : tenter le codec natif sans rendre son absence bloquante.
+    // L'original reste accepté ; aucune conversion universelle n'est promise.
+    if (isHeicOrHeif(normalized)) return normalized;
+    throw error;
+  } finally { image?.release(); }
 }

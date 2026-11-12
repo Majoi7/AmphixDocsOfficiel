@@ -98,14 +98,46 @@ test('les PDF restent inchangés même au-dessus du seuil image', async () => {
   assert.deepEqual(await prepared.arrayBuffer(), await original.arrayBuffer());
 });
 
-test('HEIC et HEIF sont conservés sans promettre une conversion', async () => {
+test('HEIC et HEIF restent acceptés si le codec natif est indisponible', async () => {
   for (const [name, type] of [['photo.HEIC', ''], ['photo.heif', 'application/octet-stream'], ['photo.bin', 'image/heic-sequence']]) {
     const original = fixture(name, 2 * 1024 * 1024, type);
-    const prepared = await library.prepareMobileUploadFile(original, forbiddenTools);
+    const calls = [];
+    const tools = {
+      decode: async (file) => { calls.push(file); throw new Error('Codec HEIC indisponible dans ce navigateur.'); },
+      encode: async () => { assert.fail('Un fichier non décodé ne doit pas être réencodé.'); },
+    };
+    const prepared = await library.prepareMobileUploadFile(original, tools);
+    assert.equal(calls.length, 1);
     assert.equal(prepared.name, original.name);
     assert.equal(prepared.lastModified, lastModified);
     assert.ok(library.isHeicOrHeif(prepared));
     assert.deepEqual(await prepared.arrayBuffer(), await original.arrayBuffer());
+  }
+});
+
+test('un HEIC décodable est compressé, sinon son original est conservé sans fuite de ressources', async () => {
+  const original = fixture('photo.HEIC', 2 * 1024 * 1024, '');
+  const available = imageTools();
+  const compressed = await library.prepareMobileUploadFile(original, available.tools);
+  assert.equal(compressed.name, 'photo.jpg');
+  assert.equal(compressed.type, 'image/jpeg');
+  assert.equal(compressed.lastModified, lastModified);
+  assert.ok(compressed.size < original.size);
+  assert.deepEqual(available.calls.map(([name]) => name), ['decode', 'encode', 'release']);
+  const unavailable = imageTools({ encode: async () => { throw new Error('Encodage HEIC indisponible.'); } });
+  const unchanged = await library.prepareMobileUploadFile(original, unavailable.tools);
+  assert.deepEqual(await unchanged.arrayBuffer(), await original.arrayBuffer());
+  assert.equal(unchanged.name, original.name);
+  assert.equal(unavailable.calls.filter(([name]) => name === 'release').length, 1);
+});
+
+test('une conversion de taille égale ou supérieure ne remplace pas l’image originale', async () => {
+  const original = fixture('photo.png', library.IMAGE_COMPRESSION_THRESHOLD + 1);
+  for (const size of [original.size, original.size + 1]) {
+    const { tools, calls } = imageTools({ encode: async () => new Blob([new Uint8Array(size)], { type: 'image/jpeg' }) });
+    const prepared = await library.prepareMobileUploadFile(original, tools);
+    assert.equal(prepared, original);
+    assert.equal(calls.filter(([name]) => name === 'release').length, 1);
   }
 });
 

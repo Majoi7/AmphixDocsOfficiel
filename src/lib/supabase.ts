@@ -4,6 +4,7 @@ import { getSupabaseClient, getSupabaseClientState, subscribeSupabaseClient } fr
 import { errorMessage } from './errors';
 import { assertPreviewIdentity, finishDocumentPreview, needsDocumentPreview } from './preview-completion';
 import type { GeneratedPreview } from './preview-generation';
+import { uploadStorageFile, type UploadProgress } from './upload-transport';
 
 export {
   getStoredSupabaseConfig, isSupabaseConfigured, reinitializeSupabase,
@@ -211,10 +212,11 @@ function validateUploadRequest(request: UploadDocumentRequest): void {
   validateClassification(request.schoolName, request.subjectName);
 }
 
-// Jeton vérifié et figé dans la fermeture, jamais dans le journal. Le client de
-// travail ne restaure pas de session. L'unification du client relève du LOT 5.
+// Le JWT reste uniquement en mémoire. Chaque requête utilise la session courante
+// du compte d'origine, vérifiée à nouveau lorsque son jeton est renouvelé.
 async function withUploadClient<T>(
-  userId: string, projectUrl: string, operation: (client: SupabaseClient<Database>, check: () => void, signal: AbortSignal) => Promise<T>,
+  userId: string, projectUrl: string, operation: (client: SupabaseClient<Database>, check: () => void, signal: AbortSignal,
+    credentials: { publicKey: string; getAccessToken: (forceRefresh?: boolean) => Promise<string> }) => Promise<T>,
   signal?: AbortSignal
 ): Promise<T> {
   assertUuid(userId, 'Identifiant du compte');
@@ -228,30 +230,59 @@ async function withUploadClient<T>(
   if (signal?.aborted) invalidate();
   const check = () => {
     const current = getSupabaseClientState();
-    if (invalidated || current.client !== authClient || current.generation !== origin.generation) {
+    if (invalidated || current.client !== authClient || current.generation !== origin.generation
+      || current.config.url !== projectUrl || current.config.key !== origin.config.key) {
       throw new UploadScopeError('Le compte ou le projet a changé. L’identité est conservée ; reconnectez le compte d’origine pour vérifier le résultat.');
     }
   };
   const unsubscribeClient = subscribeSupabaseClient(() => {
-    if (getSupabaseClientState().generation !== origin.generation) invalidate();
+    try { check(); } catch { invalidate(); }
   });
   const { data: { subscription } } = authClient.auth.onAuthStateChange((_event, session) => {
     if (session?.user?.id !== userId) invalidate();
   });
+  let verifiedToken: string | null = null;
+  let tokenRequest: Promise<string> | null = null;
+  const readToken = async (forceRefresh: boolean): Promise<string> => {
+    check();
+    const sessionResult = await authClient.auth.getSession();
+    check();
+    let session = sessionResult.data.session;
+    if (sessionResult.error || !session || session.user.id !== userId) throw new UploadScopeError('La session du compte d’origine n’est plus disponible. Reconnectez-vous avant de reprendre.');
+    if (forceRefresh || (session.expires_at !== undefined && session.expires_at * 1000 <= Date.now() + 60_000)) {
+      const refreshed = await authClient.auth.refreshSession();
+      check();
+      const refreshedSession = refreshed.data.session;
+      if (refreshed.error || !refreshedSession || refreshedSession.user.id !== userId) throw new UploadScopeError('Reconnectez-vous au compte utilisé pour ce dépôt, puis réessayez.');
+      session = refreshedSession;
+    }
+    const accessToken = session.access_token;
+    if (accessToken !== verifiedToken) {
+      const verified = await authClient.auth.getUser(accessToken);
+      check();
+      if (verified.error || verified.data.user?.id !== userId) throw new UploadScopeError(`La session n’a pas pu être vérifiée : ${errorMessage(verified.error, 'Compte incompatible.')} Aucun nouvel envoi n’est autorisé.`);
+      verifiedToken = accessToken;
+    }
+    return accessToken;
+  };
+  const getAccessToken = async (forceRefresh = false): Promise<string> => {
+    if (tokenRequest) {
+      const pending = tokenRequest;
+      if (!forceRefresh) return pending;
+      await pending;
+    }
+    const pending = readToken(forceRefresh);
+    tokenRequest = pending;
+    try { return await pending; }
+    finally { if (tokenRequest === pending) tokenRequest = null; }
+  };
   try {
-    check();
-    const session = await authClient.auth.getSession();
-    check();
-    if (session.error || session.data.session?.user.id !== userId) throw new UploadScopeError('La session du compte d’origine n’est plus disponible. Reconnectez-vous avant de reprendre.');
-    const accessToken = session.data.session.access_token;
-    const verified = await authClient.auth.getUser(accessToken);
-    check();
-    if (verified.error || verified.data.user?.id !== userId) throw new UploadScopeError(`La session n’a pas pu être vérifiée : ${errorMessage(verified.error, 'Compte incompatible.')} Aucun nouvel envoi n’est autorisé.`);
+    await getAccessToken();
     const client = createClient<Database>(projectUrl, origin.config.key, {
-      accessToken: async () => { check(); return accessToken; },
+      accessToken: getAccessToken,
       global: { fetch: (input, init) => { check(); return globalThis.fetch(input, { ...init, signal: controller.signal, cache: 'no-store' }); } },
     });
-    const result = await operation(client, check, controller.signal);
+    const result = await operation(client, check, controller.signal, { publicKey: origin.config.key, getAccessToken });
     check();
     const currentSession = await authClient.auth.getSession();
     check();
@@ -280,13 +311,20 @@ function isMissingStorageObject(error: unknown): boolean {
 }
 export async function resumeUserDocument(
   request: UploadDocumentRequest, file?: File, onStage?: (stage: UploadStage) => void,
-  projectUrl = getSupabaseClientState().config.url, mode: 'initial' | 'resume' = 'resume'
+  projectUrl = getSupabaseClientState().config.url, mode: 'initial' | 'resume' = 'resume',
+  onProgress?: (progress: UploadProgress) => void
 ): Promise<DocumentItem> {
   validateUploadRequest(request);
   let storageConfirmed = false;
+  let currentStage: UploadStage | null = null;
+  const publishStage = (stage: UploadStage) => {
+    if (currentStage === stage) return;
+    currentStage = stage;
+    onStage?.(stage);
+  };
   const failure = (message: string, kind: UploadFailureKind = 'uncertain') => new DocumentUploadError(message, request.identity, storageConfirmed, kind);
   try {
-    const document = await withUploadClient(request.userId, projectUrl, async (client, check) => {
+    const document = await withUploadClient(request.userId, projectUrl, async (client, check, signal, credentials) => {
       const lookup = async (): Promise<WithAuthor | null> => {
         check();
         let row: WithAuthor | null;
@@ -309,7 +347,7 @@ export async function resumeUserDocument(
         return row;
       };
       const verifyStorage = async (): Promise<'present' | 'missing'> => {
-        onStage?.('verification');
+        publishStage('verification');
         check();
         const result = await client.storage.from('documents').download(request.identity.filePath, {}, { cache: 'no-store' });
         check();
@@ -324,7 +362,7 @@ export async function resumeUserDocument(
         storageConfirmed = true;
         return 'present';
       };
-      onStage?.('verification');
+      publishStage('verification');
       const existing = await lookup();
       if (existing) {
         if (await verifyStorage() !== 'present') throw failure('Les métadonnées existent, mais le fichier n’est pas accessible. Aucune compensation automatique effectuée.');
@@ -340,18 +378,23 @@ export async function resumeUserDocument(
           throw failure('Le fichier resélectionné ne correspond pas à l’original (nom, taille ou contenu). Aucun nouvel envoi effectué.', 'conflict');
         }
         check();
-        onStage?.('transfert');
+        publishStage('transfert');
         let transferError: unknown = null;
         try {
-          const response = await client.storage.from('documents').upload(request.identity.filePath, file, { cacheControl: '0', upsert: false });
+          await uploadStorageFile({
+            projectUrl, publicKey: credentials.publicKey, userId: request.userId,
+            filePath: request.identity.filePath, sha256: request.sha256, file,
+            signal, checkScope: check, getAccessToken: credentials.getAccessToken,
+            reconcile: verifyStorage,
+            onProgress: (progress) => { check(); publishStage('transfert'); onProgress?.(progress); },
+          });
           check();
-          if (!response.error && response.data?.path === request.identity.filePath) storageConfirmed = true;
-          else transferError = response.error || new Error('Réponse Storage absente ou incompatible.');
+          storageConfirmed = true;
         } catch (error) { check(); transferError = error; }
         if (!storageConfirmed && await verifyStorage() !== 'present') throw failure(`Le transfert n’a pas été confirmé : ${errorMessage(transferError)} Réessayez sous la même identité.`, 'retryable');
       }
       check();
-      onStage?.('enregistrement');
+      publishStage('enregistrement');
       let confirmed: WithAuthor | null = null;
       let insertError: unknown = null;
       try {
@@ -379,7 +422,7 @@ export async function resumeUserDocument(
         }
       } catch (error) { check(); insertError = error; }
       if (insertError || !confirmed) {
-        onStage?.('verification');
+        publishStage('verification');
         confirmed = await lookup();
         if (!confirmed) throw failure(`Le fichier est conservé, mais les métadonnées ne sont pas confirmées : ${errorMessage(insertError, 'Réponse SQL absente.')} Reprenez sans renvoyer les fichiers déjà confirmés.`);
       }
@@ -387,7 +430,7 @@ export async function resumeUserDocument(
       check();
       return mapDocument(confirmed);
     });
-    onStage?.('termine');
+    publishStage('termine');
     return document;
   } catch (error) {
     if (error instanceof DocumentUploadError) throw error;

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, afterEach, before, test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { access, mkdtemp, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -33,6 +33,7 @@ const input = '.leo-panel textarea';
 const resultCards = '.leo-results button[aria-haspopup="dialog"]';
 const steps = '.leo-panel [data-status]';
 const blockedRequests = [], remoteResponses = [], protocolErrors = [], runtimeErrors = [];
+const downloads = [], downloadStates = new Map();
 let server, origin, browser, cdp, session, profile;
 let pendingNetworkProbe = null;
 let previousRuntimeErrors = 0;
@@ -307,6 +308,8 @@ before(async () => {
   const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
   ({ sessionId: session } = await cdp.send('Target.attachToTarget', { targetId, flatten: true }));
   cdp.listeners.add(async (event) => {
+    if (event.method === 'Browser.downloadWillBegin') downloads.push(event.params);
+    if (event.method === 'Browser.downloadProgress') downloadStates.set(event.params.guid, event.params.state);
     if (event.sessionId !== session) return;
     if (event.method === 'Fetch.requestPaused') {
       const url = event.params.request.url;

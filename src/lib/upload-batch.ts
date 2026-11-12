@@ -1,4 +1,5 @@
 import type { DocumentItem, UploadDocumentRequest, UploadFailureKind, UploadStage } from './supabase';
+import type { UploadProgress } from './upload-transport';
 import { logDevelopmentError, userError } from './errors';
 import { assertPreviewIdentity, needsDocumentPreview } from './preview-completion';
 
@@ -9,6 +10,7 @@ export interface UploadBatchEntry {
   attempted: boolean;
   status: BatchEntryStatus;
   stage: UploadStage | 'preparation';
+  progress: UploadProgress | null;
   document: DocumentItem | null;
   error: string | null;
   failureKind: UploadFailureKind | null;
@@ -57,7 +59,7 @@ export interface UploadBatchDependencies {
   uploadDocument: (
     request: UploadDocumentRequest, file: File | undefined,
     onStage: (stage: UploadStage) => void, projectUrl: string,
-    mode: 'initial' | 'resume'
+    mode: 'initial' | 'resume', onProgress: (progress: UploadProgress) => void
   ) => Promise<DocumentItem>;
   completePreview?: (document: DocumentItem, file: File | undefined) => Promise<DocumentItem>;
 }
@@ -83,7 +85,7 @@ export function createUploadBatch(
   const batch: UploadBatch = {
     id, userId, projectUrl, legacySource: null, notificationError: null,
     entries: prepared.map(({ request, file }) => ({
-      request, file, attempted: false, status: 'pending', stage: 'preparation',
+      request, file, attempted: false, status: 'pending', stage: 'preparation', progress: null,
       document: null, error: null, failureKind: null,
     })),
   };
@@ -149,11 +151,18 @@ export async function runUploadBatch(
     const entry = current.entries[index];
     if (entry.status === 'confirmed' || entry.failureKind === 'conflict') continue;
     const mode = entry.attempted ? 'resume' : 'initial';
-    updateEntry(index, { status: 'working', attempted: true, stage: 'verification', error: null, failureKind: null });
+    updateEntry(index, { status: 'working', attempted: true, stage: 'verification', progress: null, error: null, failureKind: null });
     try {
       checkScope();
       const document = await dependencies.uploadDocument(entry.request, entry.file,
-        (stage) => { if (dependencies.isCurrent()) updateEntry(index, { stage }); }, current.projectUrl, mode);
+        (stage) => { if (dependencies.isCurrent()) updateEntry(index, { stage }); }, current.projectUrl, mode,
+        (progress) => {
+          if (!dependencies.isCurrent() || current.entries[index].status !== 'working'
+            || !Number.isFinite(progress.uploadedBytes) || progress.uploadedBytes < 0
+            || progress.totalBytes !== entry.request.fileSize
+            || !['standard', 'tus'].includes(progress.transport)) return;
+          updateEntry(index, { progress: { ...progress, uploadedBytes: Math.min(progress.uploadedBytes, progress.totalBytes) } });
+        });
       checkScope();
       if (document.id !== entry.request.identity.id || document.user_id !== entry.request.userId
         || document.file_path !== entry.request.identity.filePath) {
@@ -302,7 +311,7 @@ function parseJournal(raw: string, userId: string, projectUrl: string): UploadBa
   if (new Set(requests.map((request) => request.identity.id)).size !== requests.length) throw new Error('Identités répétées.');
   return { id: value.id, userId, projectUrl, legacySource, notificationError: null,
     // Aucune confirmation distante n'est supposée après un rechargement.
-    entries: requests.map((request) => ({ request, attempted: true, status: 'pending', stage: 'verification',
+    entries: requests.map((request) => ({ request, attempted: true, status: 'pending', stage: 'verification', progress: null,
       document: null, error: null, failureKind: null })) };
 }
 // Le brouillon IndexedDB conserve exactement le même contrat de reprise que

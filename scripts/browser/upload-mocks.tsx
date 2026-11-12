@@ -59,6 +59,18 @@ export function useAuth() {
 export const fixtureUser = () => user.id;
 export const fixtureNetworkAttempts = () => forbiddenSdkCalls;
 
+// L'aperçu facultatif est hors périmètre : ne fabriquer ni miniature ni nombre
+// de pages, et ne jamais appeler le service de production depuis ce banc.
+export async function fixtureCompletePreview(
+  expected: DocumentItem, actorId: string, _source?: Blob, signal?: AbortSignal,
+): Promise<DocumentItem> {
+  if (signal?.aborted) throw new DOMException('Aperçu fictif annulé.', 'AbortError');
+  if (user.id !== actorId || expected.user_id !== actorId) {
+    throw Object.assign(new Error('Le compte de test a changé.'), { kind: 'scope' });
+  }
+  throw new Error('Aperçu facultatif volontairement indisponible dans ce banc sans réseau.');
+}
+
 export const transportCalls: { request: UploadDocumentRequest; mode: string; hasFile: boolean }[] = [];
 let failNextTransfer = false;
 let transportGate: Promise<void> | null = null;
