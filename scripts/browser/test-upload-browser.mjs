@@ -185,6 +185,14 @@ async function click(selector) {
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', clickCount: 1, ...point });
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, ...point });
 }
+async function activateChooser(kind = 'files') {
+  const before = choosers.length;
+  await click(`label[for$="-${kind}"]`);
+  await waitUntil(async () => choosers.length > before
+    || await evaluate('document.body.textContent.includes("Touchez de nouveau")'), 'sauvegarde avant le sélecteur natif');
+  if (choosers.length === before) await click(`label[for$="-${kind}"]`);
+  await waitUntil(() => choosers.length === before + 1, 'activation native après commit IndexedDB');
+}
 async function fill(selector, text) {
   await evaluate(`(() => {
     const element = document.querySelector(${JSON.stringify(selector)});
@@ -250,8 +258,8 @@ before(async () => {
   const files = new Map(outputs.map((output) => [output.fileName, output.type === 'chunk' ? output.code : output.source]));
   const html = [...files.keys()].find((file) => file.endsWith('upload-harness.html'));
   assert.ok(html, 'Le build isolé doit fournir son entrée HTML.');
-  const csp = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'none'; media-src 'self' blob:; worker-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-  const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+  const csp = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; media-src 'self' blob:; worker-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
   server = createServer((request, response) => {
     const pathname = new URL(request.url, 'http://127.0.0.1').pathname;
     const key = pathname === '/' ? html : pathname.slice(1);
@@ -383,9 +391,10 @@ test('sélecteurs natifs, cible tactile, focus confiné et restauration à 320 p
   }
   assert.match(pickers.find((picker) => picker.id.endsWith('-files')).accept, /\.pdf/);
   assert.equal(pickers.find((picker) => picker.id.endsWith('-camera')).capture, 'environment');
-  const chooserBefore = choosers.length;
-  await click('label[for$="-files"]');
-  await waitUntil(() => choosers.length === chooserBefore + 1, 'activation native du label de fichier');
+  await activateChooser();
+  assert.equal((await api('readDraft')).picker.kind, 'files');
+  await evaluate('document.querySelector(\'input[type="file"][id$="-files"]\').dispatchEvent(new Event("cancel"))');
+  await saved({ picker: null });
   await evaluate('document.querySelector(\'[aria-label="Fermer le dépôt"]\').focus()');
   await key('Tab', 'Tab', 8);
   assert.equal(await evaluate('document.activeElement.textContent.trim()'), 'Fermer');
@@ -419,6 +428,94 @@ test('FileList copiée, MIME PDF déduit et saisies/octets restaurés après rec
   assert.equal(await evaluate('document.querySelector("#upload-subject").value'), 'Mathématiques');
   assert.deepEqual((await api('readDraft')).files, draft.files);
   assert.equal(await evaluate('document.querySelector(\'button[type="submit"]\').textContent.trim()'), 'Reprendre l’envoi');
+  assert.equal((await api('calls')).length, 0);
+});
+
+test('sélecteur interrompu : marqueur conservé avant ouverture et message après rechargement', async () => {
+  await form(17);
+  const previous = (await api('readDraft')).files;
+  await activateChooser('gallery');
+  assert.equal((await api('readDraft')).picker.kind, 'gallery');
+  await reload();
+  await open();
+  assert.equal(await evaluate('document.body.textContent.includes("La page s\\\'est rechargée pendant le choix du fichier")'), true);
+  assert.deepEqual((await api('readDraft')).files, previous);
+  await api('chooseFiles', [{ name: 'nouveau.txt', text: 'nouveaux octets', type: 'text/plain' }]);
+  await saved({ picker: null, titles: ['nouveau'], filesPrepared: [false] });
+  assert.equal(await evaluate('document.body.textContent.includes("La page s\\\'est rechargée pendant le choix du fichier")'), false);
+  assert.equal((await api('calls')).length, 0);
+});
+
+test('quota avant sélecteur : aucune ouverture native avant le réessai confirmé', async () => {
+  await form(18);
+  const before = choosers.length;
+  await api('failNextPut');
+  await click('label[for$="-files"]');
+  await waitFor('!!document.querySelector(\'[role="alert"] button\')', 'quota du marqueur de sélection');
+  assert.equal(choosers.length, before);
+  await click('[role="alert"] button');
+  await saved();
+  await activateChooser();
+  assert.equal(choosers.length, before + 1);
+  await evaluate('document.querySelector(\'input[type="file"][id$="-files"]\').dispatchEvent(new Event("cancel"))');
+  await saved({ picker: null });
+});
+
+test('octets et aperçu : aucun traitement avant commit, miniature réelle ensuite non bloquante', async () => {
+  await fresh(19);
+  await open();
+  const png = await evaluate(`(() => {
+    const canvas = document.createElement('canvas'); canvas.width = 24; canvas.height = 16;
+    const context = canvas.getContext('2d'); context.fillStyle = '#ff6a2b'; context.fillRect(0, 0, 24, 16);
+    return canvas.toDataURL('image/png').split(',')[1];
+  })()`);
+  const before = (await api('diagnostics')).length;
+  await api('holdNextOpen');
+  await api('chooseFiles', [{ name: 'photo.png', base64: png, type: 'image/png' }]);
+  await waitFor('window.__uploadHarness.hasHeldOpen()', 'conservation des octets retenue');
+  assert.equal(await evaluate('!!document.querySelector(\'img[alt="Aperçu de photo.png"]\')'), false);
+  assert.ok(!(await api('diagnostics')).slice(before).some((entry) => entry.event === 'preview-started'));
+  assert.equal(await evaluate('document.querySelector(\'button[type="submit"]\').disabled'), true);
+  await api('releaseOpen');
+  await saved({ titles: ['photo'], filesPrepared: [false] });
+  await waitFor('!!document.querySelector(\'img[alt="Aperçu de photo.png"]\')?.naturalWidth', 'miniature JPEG issue du vrai codec');
+  const events = (await api('diagnostics')).slice(before).map((entry) => entry.event);
+  assert.ok(events.indexOf('file-saved') > events.indexOf('file-received'));
+  assert.ok(events.indexOf('preview-started') > events.indexOf('file-saved'));
+  assert.ok(events.indexOf('preview-finished') > events.indexOf('preview-started'));
+  await fill('#upload-school', 'IFRI'); await saved({ schoolName: 'IFRI' });
+  await fill('#upload-subject', 'Image'); await saved({ subjectName: 'Image' });
+  await submit(); await finished();
+  assert.equal((await api('calls')).length, 1);
+});
+
+test('quota des octets : sélection récupérable en mémoire par Réessayer, sans resélection', async () => {
+  await form(20);
+  const previous = (await api('readDraft')).files;
+  await api('failNextPut');
+  await api('chooseFiles', [{ name: 'nouveau.txt', text: 'nouveaux octets', type: 'text/plain' }]);
+  await waitFor('!!document.querySelector(\'[role="alert"] button\')', 'quota des octets');
+  assert.deepEqual((await api('readDraft')).files, previous);
+  assert.equal(await evaluate('document.querySelector("#upload-school").matches(":disabled")'), true);
+  assert.equal(await evaluate('document.querySelector(\'button[type="submit"]\').disabled'), true);
+  await click('[role="alert"] button');
+  await saved({ titles: ['nouveau'], filesPrepared: [false] });
+  assert.equal((await api('readDraft')).files[0].text, 'nouveaux octets');
+  assert.equal(await evaluate('document.querySelector("#upload-file-title-0").value'), 'nouveau');
+  assert.equal((await api('calls')).length, 0);
+});
+
+test('image lourde illisible : octets conservés avant tout codec et après rechargement', async () => {
+  await fresh(21);
+  await open();
+  await api('chooseFiles', [{ name: 'image-illisible.png', size: 2 * 1024 * 1024, type: 'image/png' }]);
+  await saved({ titles: ['image-illisible'], filesPrepared: [false] });
+  await waitFor('window.__uploadHarness.diagnostics().some((entry) => entry.event === "preview-failed")', 'aperçu illisible non bloquant');
+  assert.equal(await evaluate('document.querySelector(\'button[type="submit"]\').disabled'), false);
+  assert.equal(await evaluate('(async () => (await window.__uploadHarness.readDraft()).files[0].size)()'), 2 * 1024 * 1024);
+  await reload(); await open();
+  await saved({ titles: ['image-illisible'], filesPrepared: [false] });
+  assert.equal(await evaluate('(async () => (await window.__uploadHarness.readDraft()).files[0].size)()'), 2 * 1024 * 1024);
   assert.equal((await api('calls')).length, 0);
 });
 

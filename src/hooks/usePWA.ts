@@ -13,18 +13,18 @@ export function usePWA() {
   const [isIOS, setIsIOS] = useState<boolean>(false);
   const [isDismissed, setIsDismissed] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
-    const dismissedAt = localStorage.getItem(INSTALL_DISMISSED_KEY);
-    if (!dismissedAt) return false;
-    // Réafficher après 7 jours si non installé
-    const diffDays = (Date.now() - parseInt(dismissedAt, 10)) / (1000 * 60 * 60 * 24);
-    return diffDays < 7;
+    try {
+      const dismissedAt = localStorage.getItem(INSTALL_DISMISSED_KEY);
+      if (!dismissedAt) return false;
+      // Réafficher après 7 jours si non installé.
+      const diffDays = (Date.now() - parseInt(dismissedAt, 10)) / (1000 * 60 * 60 * 24);
+      return diffDays < 7;
+    } catch { return false; }
   });
   const [isOnline, setIsOnline] = useState<boolean>(() => {
     if (typeof navigator === 'undefined') return true;
     return navigator.onLine;
   });
-  const [needRefresh, setNeedRefresh] = useState<boolean>(false);
-  const [updateSW, setUpdateSW] = useState<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -50,7 +50,7 @@ export function usePWA() {
     const handleAppInstalled = () => {
       setIsStandalone(true);
       setDeferredPrompt(null);
-      localStorage.removeItem(INSTALL_DISMISSED_KEY);
+      try { localStorage.removeItem(INSTALL_DISMISSED_KEY); } catch { /* Installation indépendante du stockage. */ }
     };
 
     const handleOnline = () => setIsOnline(true);
@@ -61,24 +61,8 @@ export function usePWA() {
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
-    // Enregistrement du service worker avec détection des mises à jour
-    if ('serviceWorker' in navigator && import.meta.env.PROD) {
-      import('virtual:pwa-register')
-        .then(({ registerSW }) => {
-          const update = registerSW({
-            onNeedRefresh() {
-              setNeedRefresh(true);
-            },
-            onOfflineReady() {
-              console.log('AmphixDocs est prêt pour une utilisation hors-ligne.');
-            },
-          });
-          setUpdateSW(() => update);
-        })
-        .catch(() => {
-          // Environnement de dev ou virtual module non disponible
-        });
-    }
+    // Aucun enregistrement ni activation de service worker. Le manifest et les
+    // événements natifs d'installation restent indépendants du mode hors ligne.
 
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
@@ -113,23 +97,13 @@ export function usePWA() {
     }
   }, []);
 
-  const refreshApp = useCallback(async () => {
-    if (updateSW) {
-      await updateSW();
-    } else {
-      window.location.reload();
-    }
-  }, [updateSW]);
-
   return {
     isInstallable: Boolean(deferredPrompt) || (isIOS && !isStandalone),
     isStandalone,
     isIOS,
     isDismissed,
     isOnline,
-    needRefresh,
     promptInstall,
     dismissPrompt,
-    refreshApp,
   };
 }

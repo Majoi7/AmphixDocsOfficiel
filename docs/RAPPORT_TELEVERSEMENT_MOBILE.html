@@ -1,0 +1,563 @@
+<title>Rapport téléversement mobile</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap" referrerpolicy="no-referrer">
+<style>
+    /* Rapport de qualification : verdict, preuves, puis ordre des vérifications. */
+    
+     :root {
+        --paper: #f1ece4;
+        --ink: #141414;
+        --muted: #58544f;
+        --cobalt: #4a6cf0;
+        --orange: #ad3c09;
+        --rose: #a72455;
+        --body-font: "DM Sans", system-ui, sans-serif;
+        --heading-font: "Manrope", "DM Sans", system-ui, sans-serif;
+        --utility-font: ui-monospace, Consolas, monospace;
+    }
+    
+    @media (prefers-color-scheme: dark) {
+         :root:not([data-theme="light"]) {
+            --paper: #191824;
+            --ink: #f1ece4;
+            --muted: #c3beb8;
+            --cobalt: #9ab8ff;
+            --orange: #ffab7f;
+            --rose: #ffb6d2;
+            color-scheme: dark;
+        }
+    }
+    
+     :root[data-theme="dark"] {
+        --paper: #191824;
+        --ink: #f1ece4;
+        --muted: #c3beb8;
+        --cobalt: #9ab8ff;
+        --orange: #ffab7f;
+        --rose: #ffb6d2;
+        color-scheme: dark;
+    }
+    
+    * {
+        box-sizing: border-box;
+    }
+    
+    body {
+        background: var(--paper);
+        color: var(--ink);
+        font-family: var(--body-font);
+        line-height: 1.65;
+        font-size: 16px;
+        padding-left: max(16px, env(safe-area-inset-left, 0px));
+        padding-right: max(16px, env(safe-area-inset-right, 0px));
+        padding-block: 32px 48px;
+    }
+    
+    main {
+        max-width: 980px;
+        margin-inline: auto;
+        display: grid;
+        gap: 32px;
+        min-width: 0;
+    }
+    
+    header,
+    section {
+        min-width: 0;
+        display: grid;
+        gap: 12px;
+    }
+    
+    h1,
+    h2,
+    h3,
+    p,
+    ul,
+    ol {
+        margin: 0;
+    }
+    
+    h1,
+    h2,
+    h3 {
+        font-family: var(--heading-font);
+        text-wrap: balance;
+        line-height: 1.25;
+    }
+    
+    h1 {
+        font-size: clamp(1.8rem, 5vw, 2.65rem);
+        max-width: 24ch;
+    }
+    
+    h2 {
+        font-size: 1.35rem;
+    }
+    
+    h3 {
+        font-size: 1.08rem;
+    }
+    
+    p {
+        max-width: 78ch;
+    }
+    
+    .kicker,
+    .meta {
+        color: var(--muted);
+        font-size: .84rem;
+    }
+    
+    .kicker {
+        letter-spacing: .08em;
+        text-transform: uppercase;
+        font-weight: 700;
+    }
+    
+    .verdict {
+        border: 2px solid var(--orange);
+        border-radius: 24px;
+        padding: 22px;
+        display: grid;
+        gap: 12px;
+    }
+    
+    .verdict h2 {
+        color: var(--orange);
+    }
+    
+    nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 16px;
+        font-size: .9rem;
+    }
+    
+    a {
+        color: var(--cobalt);
+        text-underline-offset: 3px;
+    }
+    
+    a:focus-visible {
+        outline: 2px solid var(--cobalt);
+        outline-offset: 4px;
+    }
+    
+    .table-wrap {
+        max-width: 100%;
+        overflow-x: auto;
+    }
+    
+    table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: .9rem;
+    }
+    
+    th,
+    td {
+        padding: 12px 10px;
+        border-bottom: 1px solid color-mix(in srgb, var(--ink) 18%, transparent);
+        vertical-align: top;
+        text-align: left;
+    }
+    
+    th {
+        font-family: var(--heading-font);
+        font-weight: 800;
+    }
+    
+    td:first-child {
+        font-weight: 600;
+    }
+    
+    code {
+        font-family: var(--utility-font);
+        font-size: .82em;
+        overflow-wrap: anywhere;
+    }
+    
+    .number {
+        font-variant-numeric: tabular-nums;
+    }
+    
+    .pass {
+        color: var(--cobalt);
+        font-weight: 700;
+    }
+    
+    .fail {
+        color: var(--rose);
+        font-weight: 700;
+    }
+    
+    .wait {
+        color: var(--orange);
+        font-weight: 700;
+    }
+    
+    ul,
+    ol {
+        padding-left: 22px;
+        display: grid;
+        gap: 8px;
+    }
+    
+    .steps {
+        gap: 16px;
+    }
+    
+    .steps li {
+        padding-left: 4px;
+    }
+    
+    .evidence {
+        display: block;
+        color: var(--muted);
+        font-size: .81rem;
+        margin-top: 5px;
+    }
+    
+    .note {
+        font-size: .91rem;
+        color: var(--muted);
+    }
+    
+    .divider {
+        border-top: 1px solid color-mix(in srgb, var(--ink) 22%, transparent);
+        padding-top: 24px;
+    }
+    
+    @media (max-width: 550px) {
+        body {
+            font-size: 15px;
+            padding-block: 22px 32px;
+        }
+        main {
+            gap: 26px;
+        }
+        th,
+        td {
+            padding: 10px 8px;
+        }
+        .verdict {
+            padding: 18px;
+        }
+    }
+</style>
+<main>
+    <header>
+        <p class="kicker">Audit local · AmphixDocs · 13 novembre 2026</p>
+        <h1>Téléversement mobile : état et préparation du test</h1>
+        <p>Rapport fondé sur le code actuel, ses changements non commités et les contrôles exécutés pendant cette reprise. Il distingue l’implémentation, les tests locaux et les vérifications encore nécessaires.</p>
+        <p class="meta">Aucun code source modifié. Aucun accès Supabase distant, aucune migration exécutée, aucun déploiement et aucun test sur téléphone physique.</p>
+    </header>
+
+    <aside class="verdict" aria-labelledby="verdict-title">
+        <h2 id="verdict-title">Pas encore de feu vert pour un test public en production</h2>
+        <p>Le parcours mobile est largement implémenté. Les dernières protections sont présentes en local, mais la suite de tests n’est pas entièrement verte et le formulaire n’a pas été validé dans le navigateur lors de cette reprise.</p>
+        <p><strong>Avant un essai contrôlé :</strong> remettre les bancs de tests en état, borner la préparation des photos, vérifier le schéma et les droits réellement installés, puis effectuer une recette sur Android et iPhone avec des fichiers non sensibles.</p>
+        <p class="note">Un échec du banc Node ou Edge ne prouve pas à lui seul que l’application mobile échoue. Il empêche en revanche d’affirmer que le parcours est vérifié.</p>
+    </aside>
+
+    <nav aria-label="Sections du rapport">
+        <a href="#reprise">Où on en était</a>
+        <a href="#realise">Ce qui est réalisé</a>
+        <a href="#controles">Contrôles exécutés</a>
+        <a href="#reste">Travail restant</a>
+        <a href="#recette">Recette avant production</a>
+    </nav>
+
+    <section id="reprise">
+        <h2>Où on en était</h2>
+        <ul>
+            <li><strong>Dernier jalon commité :</strong> <code>cbbe3b4</code>, du 12 novembre 2026, « Téléversement mobile robuste, téléchargement en un clic, écoles ENEAM et IFRI ». Les aperçus PDF/images avaient été ajoutés le 10 novembre.</li>
+            <li><strong>Travail suivant encore local :</strong> 16 fichiers suivis modifiés et 3 nouveaux modules non suivis : <code>module-load-error.ts</code>, <code>preview-loader.ts</code> et <code>upload-diagnostics.ts</code>. Leur présence en production
+                n’a pas été vérifiée.</li>
+            <li><strong>Objectif du delta :</strong> conserver les octets avant tout traitement coûteux, sauvegarder avant le sélecteur natif, reconnaître une page rechargée pendant la sélection, rendre les aperçus facultatifs et supprimer les rechargements
+                automatiques liés au service worker.</li>
+            <li><strong>Documentation historique :</strong> la roadmap et la checklist décrivent surtout l’audit du 5 novembre. Le formulaire actuel utilise <em>école et matière</em>, pas le parcours ancien catégorie/dossier. Les anciens totaux de tests et
+                descriptions PWA ne constituent donc pas une preuve de l’état actuel.</li>
+        </ul>
+    </section>
+
+    <section id="realise">
+        <h2>Ce qui est réalisé dans le code</h2>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Fonction</th>
+                        <th>État constaté</th>
+                        <th>Preuve</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Sélection mobile</td>
+                        <td>Fichiers, galerie et caméra arrière ; sélection multiple pour fichiers/galerie. FileList copiée avant de vider l’input ; MIME déduit si Android/Drive fournit un type vide.</td>
+                        <td><code>UploadModal.tsx:701–815</code><br><code>upload-files.ts:29–48</code></td>
+                    </tr>
+                    <tr>
+                        <td>Validation et classement</td>
+                        <td>20 Mo maximum par original, titre par fichier, école et matière obligatoires, description facultative de 200 caractères. ENEAM/IFRI proposées, saisie libre et préférences conservées.</td>
+                        <td><code>UploadModal.tsx:515</code><br><code>UploadModal.tsx:600–653</code><br><code>UploadModal.tsx:822–877</code></td>
+                    </tr>
+                    <tr>
+                        <td>Brouillon avec les octets</td>
+                        <td>IndexedDB conserve fichiers et formulaire par compte/projet. Les sauvegardes sont ordonnées et annoncées comme réussies seulement après commit. Révision vérifiée dans la transaction pour éviter l’écrasement d’un autre onglet.</td>
+                        <td><code>upload-draft.ts:112–170</code><br><code>upload-draft.ts:260–330</code><br><code>upload-draft.ts:375–447</code></td>
+                    </tr>
+                    <tr>
+                        <td>Sélecteur interrompu</td>
+                        <td>Marqueur enregistré avant ouverture du sélecteur. Si la page redémarre pendant le choix, message et sélection précédente restaurée. Second toucher proposé si l’activation native a expiré pendant la sauvegarde.</td>
+                        <td><code>UploadModal.tsx:405–456</code><br><code>UploadModal.tsx:759–765</code></td>
+                    </tr>
+                    <tr>
+                        <td>Quota et conflits locaux</td>
+                        <td>Erreur visible et Réessayer ; une nouvelle sélection non sauvegardée reste en mémoire et n’est pas présentée comme durable. Pas de transfert avant confirmation du brouillon et du journal.</td>
+                        <td><code>UploadModal.tsx:268–345</code><br><code>UploadModal.tsx:508–557</code><br><code>UploadModal.tsx:624–670</code></td>
+                    </tr>
+                    <tr>
+                        <td>Préparation des images</td>
+                        <td>Compression prévue au-delà de 1,5 Mo : JPEG qualité 0,82, dimension maximale 2048 px. Conversion plus lourde refusée au profit de l’original ; HEIC/HEIF conserve l’original si le codec manque. Une reprise ne recomprime pas ses
+                            octets figés.</td>
+                        <td><code>upload-files.ts:3–5</code><br><code>upload-files.ts:105–122</code><br><code>UploadModal.tsx:632–648</code></td>
+                    </tr>
+                    <tr>
+                        <td>Transport réseau</td>
+                        <td>XHR standard jusqu’à 6 Mio inclus ; TUS au-delà, par blocs de 6 Mio. Chaque requête XHR est bornée à 120 s, avec délais de retry 0/3/5/10/20 s. Jeton renouvelé si nécessaire, contrôles de compte/projet, pas d’upsert. URL TUS liée
+                            au compte, projet, chemin et SHA-256, conservée moins de 24 h.</td>
+                        <td><code>upload-transport.ts:4–6</code><br><code>upload-transport.ts:83–152</code><br><code>upload-transport.ts:158–336</code></td>
+                    </tr>
+                    <tr>
+                        <td>Confirmation SQL/Storage</td>
+                        <td>Une reprise retrouve les métadonnées par UUID/propriétaire et relit les octets distants pour vérifier taille et SHA-256. Une réponse SQL perdue est recherchée avant de conclure à un échec. Objet conservé si SQL reste indéterminé
+                            ; aucun nettoyage aveugle. Le transfert et l’insertion ne forment pas une transaction serveur unique.</td>
+                        <td><code>supabase.ts:218–297</code><br><code>supabase.ts:313–438</code></td>
+                    </tr>
+                    <tr>
+                        <td>Lots et reprise</td>
+                        <td>Identités et empreintes préparées avant l’envoi, journal conservé, bilan par fichier, seuls les échecs repris en mémoire. Une restauration locale ne reconstitue jamais une confirmation distante. Compte/projet obsolète interdit
+                            les publications.</td>
+                        <td><code>UploadModal.tsx:650–692</code><br><code>upload-draft.ts:174–215</code><br>Tests <code>test-upload-batch.mjs</code> et <code>test-upload-draft.mjs</code></td>
+                    </tr>
+                    <tr>
+                        <td>Progression et résultat</td>
+                        <td>Octets transférés affichés séparément de la confirmation Storage/SQL ; 100 % n’est pas un succès final. Échec de mise à jour de la liste ou de nettoyage du brouillon ne doit pas renvoyer les fichiers confirmés.</td>
+                        <td><code>UploadModal.tsx:568–598</code><br><code>UploadModal.tsx:881–925</code></td>
+                    </tr>
+                    <tr>
+                        <td>Aperçus facultatifs</td>
+                        <td>Génération après sauvegarde des octets, import différé, délai de 8 secondes, deux tâches maximum, ressources nettoyées. PDF legacy et worker locaux ; miniature JPEG. L’échec d’un aperçu est distinct de l’envoi principal.</td>
+                        <td><code>UploadModal.tsx:459–505</code><br><code>preview-loader.ts:7–17</code><br><code>preview-resources.ts:29–59</code><br><code>pdf-runtime.ts:7–15</code></td>
+                    </tr>
+                    <tr>
+                        <td>Ergonomie et navigation</td>
+                        <td>Dialogue nommé, focus confiné/restauré, Échap et navigation bloqués pendant les opérations critiques ; viewport visuel, safe areas, champs 16 px et cibles tactiles de 44 px. Ces dispositions sont implémentées, mais leur recette
+                            mobile actuelle reste ouverte.</td>
+                        <td><code>UploadModal.tsx:714–736</code><br><code>useDialogViewport.ts:4–33</code><br><code>useDialogAccessibility.ts:6–68</code></td>
+                    </tr>
+                    <tr>
+                        <td>Rechargements/PWA</td>
+                        <td>Plus de nouvel enregistrement de SW. Worker de retrait généré, sans fetch handler ni navigation des onglets. Manifest conservé ; message Actualiser manuel en cas de module indisponible. En-têtes no-cache hors assets hashés.</td>
+                        <td><code>usePWA.ts:63–70</code><br><code>vite.config.ts:13–60</code><br><code>dist/sw.js</code> lu après build<br><code>vercel.json:10–28</code></td>
+                    </tr>
+                    <tr>
+                        <td>Diagnostic local</td>
+                        <td>Journal borné de démarrage, sélecteur, réception/sauvegarde et aperçu. Aucun nom de fichier, texte, compte, clé ou octet de document enregistré dans ce diagnostic.</td>
+                        <td><code>upload-diagnostics.ts:1–61</code></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <p class="note">Les chemins des preuves sont relatifs à <code>src/components/</code>, <code>src/hooks/</code> ou <code>src/lib/</code> selon le fichier. « Implémenté » ne signifie pas « vérifié sur Supabase ou sur téléphone ».</p>
+    </section>
+
+    <section id="controles">
+        <h2>Contrôles exécutés pendant cette reprise</h2>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Contrôle</th>
+                        <th>Résultat</th>
+                        <th>Portée</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>TypeScript</td>
+                        <td class="pass">Réussi · exit 0</td>
+                        <td><code>npx --no-install tsc --noEmit</code></td>
+                    </tr>
+                    <tr>
+                        <td>Lint</td>
+                        <td class="pass">Réussi · exit 0</td>
+                        <td><code>npm run lint</code> ; alias TypeScript, pas ESLint.</td>
+                    </tr>
+                    <tr>
+                        <td>Build</td>
+                        <td class="pass">Réussi · exit 0</td>
+                        <td>Manifest et worker de retrait présents. Chunk principal <span class="number">1 007,20 kB</span>, <span class="number">301,22 kB</span> gzip. Avertissement de taille conservé.</td>
+                    </tr>
+                    <tr>
+                        <td>Neuf scripts de tests locaux</td>
+                        <td class="fail number">218 / 223 · 5 échecs</td>
+                        <td>Fichiers, brouillon, lots, relations, bibliothèque, aperçus et contrôles SQL textuels. Pas d’appel Supabase réel.</td>
+                    </tr>
+                    <tr>
+                        <td>Banc navigateur complet</td>
+                        <td class="wait">Non validé</td>
+                        <td>Initialisation expirée à 120 s ; le processus a été arrêté. Les scénarios ne sont pas validés par cette tentative.</td>
+                    </tr>
+                    <tr>
+                        <td>Sélecteurs seuls dans Edge</td>
+                        <td class="fail">Échec · exit 1</td>
+                        <td>Nouvelle tentative isolée : <code>Événement navigateur absent : Page.loadEventFired.</code> Aucun résultat fonctionnel mobile exploitable.</td>
+                    </tr>
+                    <tr>
+                        <td>Préparation photo suspendue</td>
+                        <td class="fail">Absence de borne reproduite</td>
+                        <td>Codec simulé qui ne termine pas : préparation toujours en attente après 9 s. Ce test de protocole ne prouve pas la fréquence du blocage sur téléphone.</td>
+                    </tr>
+                    <tr>
+                        <td>Secrets et exclusions</td>
+                        <td class="pass">Exclusions vérifiées</td>
+                        <td>Parmi les chemins contrôlés, seul <code>.env.example</code> est suivi ; <code>.env</code>, variantes privées, <code>dist/</code> et <code>graphify-out/</code> sont exclus. Aucune valeur de secret lue.</td>
+                    </tr>
+                    <tr>
+                        <td>Supabase / appareils / production</td>
+                        <td class="wait">Non exécuté</td>
+                        <td>Ni schéma installé, ni policies effectives, ni OAuth réel, ni transfert distant, ni Android/iPhone physiques vérifiés.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <h3>Les cinq échecs à remettre en état</h3>
+        <p>Ils se situent dans <code>scripts/test-relations.mjs</code>, aux lignes <code>386</code>, <code>455</code>, <code>470</code>, <code>486</code> et <code>507</code>. Quatre signalent <code>XMLHttpRequest is not defined</code> ; un attend une confirmation
+            Storage qui n’a pas eu lieu. Le banc historique ne simule pas correctement le chemin XHR utilisé désormais dans Node.</p>
+        <p>Il faut adapter le banc au transport actuel et rerun les scénarios de retour de dépôt, réponse Storage perdue, réponse SQL perdue, état SQL indéterminé et conflit d’empreinte. Aucun de ces cinq tests ne doit être présenté comme passé.</p>
+        <p class="note">Le build écrit ses fichiers générés dans <code>dist/</code>. Les profils temporaires de navigateur ont été conservés. Aucun changement de dépendance, lockfile, migration ou footer protégé.</p>
+    </section>
+
+    <section id="reste">
+        <h2>Ce qu’il reste à faire, dans l’ordre</h2>
+        <ol class="steps">
+            <li>
+                <h3>Remettre les preuves locales au vert</h3>
+                <p>Réparer la simulation XHR et ajouter une couverture directe des transports, de leurs délais et des pannes. Diagnostiquer le banc Edge qui n’atteint pas l’événement de chargement, puis obtenir un run du vrai formulaire. Aujourd’hui, le
+                    build est vert mais le parcours complet ne l’est pas.</p>
+            </li>
+            <li>
+                <h3>Borner la préparation des photos lourdes</h3>
+                <p>La limite de 8 s concerne l’aperçu, pas la compression effectuée au clic Déposer. <code>prepareMobileUploadFile</code> attend décodage/encodage sans délai maximal ni signal d’annulation. Un codec suspendu laisse le formulaire occupé et
+                    la fermeture/navigation bloquées. Ajouter une sortie contrôlée, libérer les ressources et permettre de réessayer sans perdre le brouillon.</p><span class="evidence"><code>src/lib/upload-files.ts:65–122</code> · <code>src/components/UploadModal.tsx:637–648</code> · attente reproduite avec un codec simulé.</span></li>
+            <li>
+                <h3>Vérifier le contrat serveur réellement installé</h3>
+                <p>Inventorier les migrations, contraintes, RPC et policies nécessaires au client actuel. La chaîne pertinente comprend V3/V4 pour relations/droits, V5 pour école/matière, corbeille et reprise historique, V6 pour bibliothèque/aperçus et V9
+                    pour les miniatures JPEG. V7/V8 concernent Léo et ne sont pas des prérequis de ce delta JPEG. Comparer à l’état installé ; ne pas rejouer les anciennes migrations aveuglément.</p>
+                <p><strong>Sans V9 compatible, les miniatures JPEG actuelles risquent d’être refusées</strong> par le bucket ou la RPC V6 qui attendait WebP. L’original peut être confirmé malgré l’échec facultatif d’aperçu ; cela ne valide pas le rendu final
+                    attendu. Les tests SQL locaux sont textuels : ils ne prouvent ni une installation correcte ni les accès réels.</p>
+                <p>Valider séparément Storage privé, limite 20 Mo, création des métadonnées, propriété des chemins, statut pending et droits auteur/autre utilisateur/admin. Une clé publique dans le navigateur ne suffit pas à garantir la confidentialité.</p>
+                <span
+                    class="evidence"><code>supabase/migration_v5.sql:1–8</code> · <code>supabase/migration_v9.sql:1–9</code> · <code>src/lib/supabase.ts:521–550</code>.</span>
+            </li>
+            <li>
+                <h3>Borner aussi les attentes SQL/Storage et les retries complets</h3>
+                <p>Les 120 s bornent chaque requête XHR, pas l’ensemble du dépôt. Les vérifications de session, les lectures SQL, les téléchargements de réconciliation et l’association des aperçus n’ont pas de délai global métier dans <code>withUploadClient</code>.
+                    Plusieurs retries peuvent maintenir le formulaire occupé longtemps. Fixer une échéance et une sortie récupérable, puis tester une réponse REST/Storage qui reste suspendue.</p><span class="evidence"><code>src/lib/supabase.ts:218–297</code> · <code>src/lib/supabase.ts:341–395</code> · <code>src/lib/upload-transport.ts:136–152</code>.</span></li>
+            <li>
+                <h3>Vérifier la transition depuis l’ancienne PWA</h3>
+                <p>Tester un téléphone qui possède déjà l’ancien worker et un navigateur neuf. Pendant un sélecteur ouvert ou un transfert, mettre à disposition la nouvelle version : aucune navigation forcée, aucune perte de brouillon. Vérifier la désinscription
+                    et l’absence de cache des appels Supabase.</p>
+                <p><strong>Contrepartie actuelle :</strong> le worker hors ligne est retiré temporairement. Le manifest reste présent ; cela ne garantit pas que la page pourra être rouverte sans réseau. Ne pas présenter l’app comme pleinement hors ligne
+                    tant que cette fonction n’est pas rétablie et testée.</p>
+            </li>
+            <li>
+                <h3>Harmoniser l’action Actualiser avec le dialogue</h3>
+                <p>La notice de module indisponible est hors du dialogue, tandis que le hook y confine le focus. Son bouton n’est pas relié aux états de sauvegarde/transfert. Vérifier l’accès clavier et empêcher une actualisation qui surprendrait une personne
+                    pendant une sauvegarde non confirmée ou une opération critique.</p><span class="evidence"><code>src/components/pwa/UpdateToast.tsx:21–35</code> · <code>src/hooks/useDialogAccessibility.ts:55–59</code> · <code>src/lib/module-load-error.ts:23–25</code>.</span></li>
+            <li>
+                <h3>Exécuter une recette sur de vrais mobiles et une base de test</h3>
+                <p>Edge émulé ne remplace pas Android Files/Drive, la caméra, Safari, iCloud et les suspensions décidées par le système. Tester sélection, compression, interruption, réouverture, quotas, progression et visibilité distante avec des fichiers
+                    non sensibles.</p>
+            </li>
+            <li>
+                <h3>Préparer une version identifiable</h3>
+                <p>Une fois les contrôles passés, inclure tous les nouveaux modules dans la livraison, retenir une révision unique, valider les en-têtes/cache sur l’hébergement réel et prévoir un retour à la version précédente. Commit et déploiement demandent
+                    un accord distinct ; aucun n’a été réalisé ici.</p>
+            </li>
+        </ol>
+        <p class="note"><strong>À mesurer en complément :</strong> mémoire et quota avec plusieurs photos lourdes, coût du chunk principal sur 4G lente, durée des imports PDF et comportement HEIC réel. IndexedDB peut être évincé par le navigateur ; la reprise n’est ni
+            inter-appareils ni un transfert garanti en arrière-plan.</p>
+    </section>
+
+    <section id="recette" class="divider">
+        <h2>Recette minimale avant un essai contrôlé en production</h2>
+        <p>Utiliser d’abord un environnement de test autorisé, deux comptes ordinaires A/B et un compte admin. Ne pas employer de documents personnels. Consigner pour chaque scénario le téléphone, le navigateur, la révision et le résultat obtenu.</p>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Scénario</th>
+                        <th>Résultat exigé</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>PDF léger depuis Android Files/Drive et iPhone Fichiers/iCloud</td>
+                        <td>Sélection, titre/classement, octets conservés, un seul objet et une seule ligne SQL ; téléchargement relu après rechargement.</td>
+                    </tr>
+                    <tr>
+                        <td>Galerie et photo caméra, JPEG/PNG lourd et HEIC/HEIF</td>
+                        <td>Aucun redémarrage perdant les octets sauvegardés ; préparation bornée ; original ou conversion conforme ; aperçu facultatif.</td>
+                    </tr>
+                    <tr>
+                        <td>Annuler le sélecteur puis resélectionner le même fichier</td>
+                        <td>Sélecteur de nouveau utilisable ; ancienne sélection et saisies intactes ; marqueur nettoyé.</td>
+                    </tr>
+                    <tr>
+                        <td>Page tuée/rechargée pendant le choix, puis après sauvegarde</td>
+                        <td>Message compréhensible si choix interrompu ; brouillon réellement sauvegardé restauré ; aucun envoi automatique.</td>
+                    </tr>
+                    <tr>
+                        <td>20 971 520 octets, puis un octet de plus ; description 200 caractères</td>
+                        <td>Limite cohérente UI/serveur ; dépassement refusé avant nouvel envoi ; sélection précédente conservée.</td>
+                    </tr>
+                    <tr>
+                        <td>Lot de trois fichiers avec panne au milieu</td>
+                        <td>Succès conservés une seule fois ; bilan exact ; reprise de l’échec sans doublon.</td>
+                    </tr>
+                    <tr>
+                        <td>Connexion lente, coupure et réponse Storage/SQL perdue</td>
+                        <td>Progression fondée sur les octets ; 100 % distinct de la confirmation ; mêmes identités ; reprise sans objet supprimé aveuglément.</td>
+                    </tr>
+                    <tr>
+                        <td>Rechargement pendant un gros transfert puis reprise</td>
+                        <td>Brouillon et journal utilisables ; contenu vérifié ; reprise du transfert effectivement démontrée, pas supposée depuis TUS.</td>
+                    </tr>
+                    <tr>
+                        <td>Quota local et deux onglets concurrents</td>
+                        <td>Erreur actionnable ; aucune fausse sauvegarde ; aucun écrasement du brouillon de l’autre onglet ; retry sûr.</td>
+                    </tr>
+                    <tr>
+                        <td>Session expirée/changement de compte pendant l’envoi</td>
+                        <td>Aucune publication dans la bibliothèque du nouveau compte ; retour au compte initial et reprise sûre.</td>
+                    </tr>
+                    <tr>
+                        <td>Visibilité pending → approved → rejected avec A/B/admin</td>
+                        <td>A voit ses fichiers ; B ne lit ni SQL ni Storage privés ; admin peut contrôler/modérer ; téléchargement approved effectif.</td>
+                    </tr>
+                    <tr>
+                        <td>Ancienne PWA → nouvelle version, clavier et petites largeurs</td>
+                        <td>Aucune actualisation automatique ; reprise conservée ; actions accessibles à 320 px et clavier ouvert ; focus et safe areas corrects.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <p><strong>Critère de passage :</strong> tests locaux requis verts, préparation photo bornée, recette Android/iPhone consignée et droits Supabase réellement vérifiés. Ensuite seulement, autoriser un essai production limité à des comptes et fichiers
+            de test avec surveillance et possibilité de revenir en arrière.</p>
+        <p class="note">Ce rapport n’annonce aucune validation distante et ne coche pas les cases historiques de la roadmap. Il rend visible le travail local actuel et ses limites avant la décision de livraison.</p>
+    </section>
+</main>

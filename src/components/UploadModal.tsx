@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type ChangeEvent, type DragEvent, type FormEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type ChangeEvent, type DragEvent, type FormEvent, type MouseEvent } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { AlertCircle, Camera, CheckCircle2, FileText, Images, UploadCloud, X } from 'lucide-react';
 import {
@@ -17,8 +17,13 @@ import {
 } from '../lib/upload-preferences';
 import { getSupabaseClientState, subscribeSupabaseClient } from '../lib/supabase-config';
 import { userError } from '../lib/errors';
-import { prepareMobileUploadFile, UPLOAD_FILE_ACCEPT, UPLOAD_IMAGE_ACCEPT } from '../lib/upload-files';
-import { createUploadDraftPersistence, reconcileUploadDraftBatch, UploadDraftConflictError, type UploadDraftInput } from '../lib/upload-draft';
+import { inferUploadMimeType, normalizeUploadFile, prepareMobileUploadFile, UPLOAD_FILE_ACCEPT, UPLOAD_IMAGE_ACCEPT } from '../lib/upload-files';
+import {
+  createUploadDraftPersistence, reconcileUploadDraftBatch, UploadDraftConflictError,
+  type UploadDraftInput, type UploadPickerKind, type UploadPickerMarker,
+} from '../lib/upload-draft';
+import { logUploadDiagnostic } from '../lib/upload-diagnostics';
+import { loadOptionalDocumentPreview } from '../lib/preview-loader';
 import { useAuth } from '../context/AuthContext';
 import { useDialogAccessibility } from '../hooks/useDialogAccessibility';
 import { useDialogViewport } from '../hooks/useDialogViewport';
@@ -33,9 +38,11 @@ interface UploadModalProps {
 }
 const fieldClass = 'w-full min-w-0 min-h-11 rounded-2xl border-0 bg-[#e9e3da] px-3 py-2.5 text-base text-[#141414] caret-[#141414] placeholder:text-[#141414]/45 outline-none ring-0 focus:bg-[#dfd8ce] focus:outline-none focus:ring-0 disabled:opacity-60';
 const buttonClass = 'inline-flex min-h-11 min-w-11 items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-semibold cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#ff6a2b] disabled:cursor-not-allowed disabled:opacity-50';
+const PICKER_RELOAD_MESSAGE = "La page s'est rechargée pendant le choix du fichier. Choisis-le à nouveau.";
+const pickerLabel = (kind: UploadPickerKind) => kind === 'camera' ? 'Prendre une photo' : kind === 'gallery' ? 'Ouvrir la galerie' : 'Ouvrir les fichiers';
 const journalStorage = () => {
   try { return window.localStorage; }
-  catch { throw new Error('Le stockage du navigateur est inaccessible. Autorisez-le puis réessayez ; aucun nouvel envoi n’a été démarré.'); }
+  catch { throw new Error('Le stockage du navigateur est inaccessible. Vérifiez l’espace disponible ou essayez hors navigation privée, puis réessayez ; aucun nouvel envoi n’a été démarré.'); }
 };
 
 export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadModalProps) {
@@ -63,6 +70,12 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
   const [restoredDraft, setRestoredDraft] = useState(false);
   const [draftScope, setDraftScope] = useState<string | null>(null);
   const [draftReadAttempt, setDraftReadAttempt] = useState(0);
+  const [filesPrepared, setFilesPrepared] = useState<boolean[]>([]);
+  const [picker, setPicker] = useState<UploadPickerMarker | null>(null);
+  const [pickerReady, setPickerReady] = useState<UploadPickerKind | null>(null);
+  const [pickerReloaded, setPickerReloaded] = useState(false);
+  const [isSavingPicker, setIsSavingPicker] = useState(false);
+  const [localPreviews, setLocalPreviews] = useState<ReadonlyMap<File, string>>(() => new Map());
   const pickerId = useId();
   const viewportRef = useRef<HTMLDivElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
@@ -73,7 +86,17 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
   const closedSinceReadRef = useRef(true);
   const draftScopeKeyRef = useRef<string | null>(null);
   const draftRef = useRef<ReturnType<typeof createUploadDraftPersistence> | null>(null);
-  const draftSnapshotRef = useRef<UploadDraftInput>({ files: [], titles: [], description: '', schoolName: '', subjectName: '', batch: null });
+  const draftSnapshotRef = useRef<UploadDraftInput>({ files: [], titles: [], description: '', schoolName: '', subjectName: '', batch: null, picker: null, filesPrepared: [] });
+  const pickerInputsRef = useRef<Partial<Record<UploadPickerKind, HTMLInputElement | null>>>({});
+  const pickerSavingRef = useRef(false);
+  const pickerReadyRef = useRef<UploadPickerKind | null>(null);
+  const pickerActiveRef = useRef<UploadPickerMarker | null>(null);
+  const localPreviewUrlsRef = useRef(new Map<File, string>());
+  const durableFilesRef = useRef(new Set<File>());
+  const previewAttemptsRef = useRef(new Set<File>());
+  const previewTasksRef = useRef(new Map<File, AbortController>());
+  const pickerCancelCleanupRef = useRef<(() => void) | null>(null);
+  const pendingDraftRef = useRef<UploadDraftInput | null>(null);
   const draftSequenceRef = useRef(0);
   const draftRetryRef = useRef(false);
   const currentUserIdRef = useRef(user?.id);
@@ -82,26 +105,66 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
   isOpenRef.current = isOpen;
   const reportRef = useRef(onSuccess);
   reportRef.current = onSuccess;
-  draftSnapshotRef.current = { files, titles, description, schoolName, subjectName, batch };
+  draftSnapshotRef.current = pendingDraftRef.current || { files, titles, description, schoolName, subjectName, batch, picker, filesPrepared };
 
   const publishBatch = useCallback((next: UploadBatch | null) => {
     batchRef.current = next;
     draftSnapshotRef.current = { ...draftSnapshotRef.current, batch: next };
     if (mountedRef.current) setBatch(next);
   }, []);
+  const applyStoredDraft = useCallback((snapshot: UploadDraftInput) => {
+    // Publier seulement une copie dont les octets ont été confirmés par IDB.
+    pendingDraftRef.current = null;
+    draftSnapshotRef.current = snapshot;
+    durableFilesRef.current = new Set(snapshot.files);
+    publishBatch(snapshot.batch);
+    setFiles(snapshot.files);
+    setTitles(snapshot.titles);
+    setDescription(snapshot.description);
+    setSchoolName(snapshot.schoolName);
+    setSubjectName(snapshot.subjectName);
+    setFilesPrepared(snapshot.filesPrepared || snapshot.files.map(() => true));
+    setPicker(snapshot.picker || null);
+  }, [publishBatch]);
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+      pickerCancelCleanupRef.current?.();
+      for (const controller of previewTasksRef.current.values()) controller.abort();
+      for (const url of localPreviewUrlsRef.current.values()) URL.revokeObjectURL(url);
+      previewTasksRef.current.clear();
+      localPreviewUrlsRef.current.clear();
+    };
   }, []);
+  useEffect(() => {
+    pickerCancelCleanupRef.current?.();
+    pickerCancelCleanupRef.current = null;
+    pickerActiveRef.current = null;
+    pickerReadyRef.current = null;
+    pendingDraftRef.current = null;
+    for (const controller of previewTasksRef.current.values()) controller.abort();
+    previewTasksRef.current.clear();
+    for (const url of localPreviewUrlsRef.current.values()) URL.revokeObjectURL(url);
+    localPreviewUrlsRef.current.clear();
+    durableFilesRef.current.clear();
+    previewAttemptsRef.current.clear();
+    setLocalPreviews(new Map());
+    pickerSavingRef.current = false;
+    setIsSavingPicker(false);
+    setPicker(null);
+    setPickerReady(null);
+    setPickerReloaded(false);
+  }, [user?.id, clientState.generation]);
 
   const uploadSuccess = !!batch && isUploadBatchComplete(batch);
   const scopeMatches = !!user && !!clientState.client && draftScope === `${clientState.generation}:${user.id}` && (!batch
     || (batch.userId === user.id && batch.projectUrl === clientState.config.url));
-  const fieldsLocked = isBusy || isRetryingDraft || !!batch || !journalReady || !scopeMatches;
+  const fieldsLocked = isBusy || isRetryingDraft || isSavingPicker || !!pendingDraftRef.current || !!batch || !journalReady || !scopeMatches;
   const legacyLabelsNeeded = !!batch && needsLegacyClassification(batch);
   const confirmedCount = batch?.entries.filter((entry) => entry.status === 'confirmed').length || 0;
   const suggestions = uploadSuggestions(scopeMatches ? documents : [], schoolName, scopeMatches ? preference : null);
-  useDialogAccessibility(modalRef, isOpen, onClose, !isBusy);
+  useDialogAccessibility(modalRef, isOpen, onClose, !isBusy && !isSavingPicker);
   useDialogViewport(viewportRef, isOpen);
   // Un seul blocker monté à la fois : le panneau de détail en possède aussi un.
   // Le dépôt reste monté (journal et sélection), mais son blocker ne l'est que
@@ -183,15 +246,12 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
           schoolName: labels?.schoolName || formDraft?.schoolName || last?.schoolName || '',
           subjectName: labels?.subjectName || formDraft?.subjectName || last?.subjectName || '',
           batch: restoredBatch,
+          picker: formDraft?.picker || null,
+          filesPrepared: restoredBatch ? [] : formDraft?.filesPrepared || formDraft?.files.map(() => true) || [],
         };
-        draftSnapshotRef.current = snapshot;
-        publishBatch(restoredBatch);
+        applyStoredDraft(snapshot);
         setPreference(last);
-        setFiles(snapshot.files);
-        setTitles(snapshot.titles);
-        setDescription(snapshot.description);
-        setSchoolName(snapshot.schoolName);
-        setSubjectName(snapshot.subjectName);
+        setPickerReloaded(!!snapshot.picker);
         setRestoredDraft(!!restoredBatch || !!formDraft && formDraft.files.length > 0);
         setDraftStatus(formDraft ? 'saved' : 'saving');
         draftScopeKeyRef.current = opening;
@@ -204,7 +264,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
       }
     })();
     return () => { if (lastOpeningRef.current === opening) lastOpeningRef.current = null; };
-  }, [isOpen, user?.id, clientState.client, clientState.config.url, clientState.generation, draftReadAttempt, isBusy, publishBatch]);
+  }, [isOpen, user?.id, clientState.client, clientState.config.url, clientState.generation, draftReadAttempt, isBusy, applyStoredDraft]);
 
   const persistDraft = useCallback(async (snapshot: UploadDraftInput, retry = false): Promise<void> => {
     const persistence = draftRef.current;
@@ -231,15 +291,27 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
           hashFile: hashUploadFile, isCurrent: isScopeCurrent,
         })
         : await persistence.save(snapshot, isScopeCurrent);
+      if (!isScopeCurrent()) return;
+      // Les références en mémoire désignent les octets dont le commit est
+      // confirmé ; une miniature ne doit jamais précéder cette confirmation.
+      for (const file of snapshot.files) durableFilesRef.current.add(file);
       if (!isCurrent()) return;
       if (retry) {
-        // Conserver les saisies locales. Seuls le lot rapproché et une éventuelle
-        // classification historique déjà figée remplacent leur copie en mémoire.
-        draftSnapshotRef.current = { ...snapshot, batch: saved.batch,
+        const next = { ...snapshot, batch: saved.batch,
           schoolName: saved.schoolName, subjectName: saved.subjectName };
-        publishBatch(saved.batch);
-        setSchoolName(saved.schoolName);
-        setSubjectName(saved.subjectName);
+        if (pendingDraftRef.current === snapshot) {
+          // Une sélection ou conversion conservée en mémoire après un quota
+          // n'est publiée qu'une fois son réessai réellement confirmé.
+          applyStoredDraft(next);
+          setRestoredDraft(false);
+          setPickerReloaded(false);
+          logUploadDiagnostic('file-saved', { count: next.files.length, bytes: next.files.reduce((sum, file) => sum + file.size, 0) });
+        } else {
+          draftSnapshotRef.current = next;
+          publishBatch(saved.batch);
+          setSchoolName(saved.schoolName);
+          setSubjectName(saved.subjectName);
+        }
       }
       setDraftStatus('saved');
     } catch (error) {
@@ -248,7 +320,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
     } finally {
       if (retry && isScopeCurrent()) { draftRetryRef.current = false; setIsRetryingDraft(false); }
     }
-  }, [publishBatch]);
+  }, [applyStoredDraft, publishBatch]);
   const saveDraftWithFeedback = useCallback((snapshot: UploadDraftInput, retry = false): Promise<void> => {
     const persistence = draftRef.current;
     const pending = persistDraft(snapshot, retry);
@@ -268,9 +340,9 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
   // Une suspension Android laisse au pire une sauvegarde non confirmée : le
   // statut reste honnête et le sélecteur attend cette confirmation.
   useEffect(() => {
-    if (!journalReady || !scopeMatches || isBusy || draftRetryRef.current || uploadSuccess) return;
+    if (!journalReady || !scopeMatches || isBusy || pickerSavingRef.current || pendingDraftRef.current || draftRetryRef.current || uploadSuccess) return;
     void saveDraftWithFeedback(draftSnapshotRef.current);
-  }, [files, titles, description, schoolName, subjectName, journalReady, scopeMatches, isBusy, uploadSuccess, batch?.id, saveDraftWithFeedback]);
+  }, [files, titles, description, schoolName, subjectName, picker, filesPrepared, journalReady, scopeMatches, isBusy, uploadSuccess, batch?.id, saveDraftWithFeedback]);
 
   useEffect(() => {
     const onPageHide = () => {
@@ -289,10 +361,156 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
     return () => window.removeEventListener('pagehide', onPageHide);
   }, [journalReady, scopeMatches, uploadSuccess]);
 
+  const resetPicker = () => {
+    pickerCancelCleanupRef.current?.();
+    pickerCancelCleanupRef.current = null;
+    pickerActiveRef.current = null;
+    pickerReadyRef.current = null;
+    setPickerReady(null);
+    setPickerReloaded(false);
+    draftSnapshotRef.current = { ...draftSnapshotRef.current, picker: null };
+    setPicker(null);
+  };
+  const activatePicker = (input: HTMLInputElement, marker: UploadPickerMarker) => {
+    pickerCancelCleanupRef.current?.();
+    pickerReadyRef.current = null;
+    pickerActiveRef.current = marker;
+    setPickerReady(null);
+    setPickerReloaded(false);
+    let returnTimer: ReturnType<typeof setTimeout> | undefined;
+    const cancel = () => {
+      if (pickerActiveRef.current !== marker || busyRef.current) return;
+      resetPicker();
+    };
+    // Les anciens mobiles ne déclenchent pas tous « cancel ». Laisser le
+    // changement natif arriver avant de traiter un retour sans sélection.
+    const returned = () => {
+      clearTimeout(returnTimer);
+      returnTimer = setTimeout(() => {
+        if (document.visibilityState === 'visible' && !input.files?.length) cancel();
+      }, 750);
+    };
+    const visible = () => { if (document.visibilityState === 'visible') returned(); };
+    input.addEventListener('cancel', cancel);
+    window.addEventListener('focus', returned);
+    document.addEventListener('visibilitychange', visible);
+    pickerCancelCleanupRef.current = () => {
+      clearTimeout(returnTimer);
+      input.removeEventListener('cancel', cancel);
+      window.removeEventListener('focus', returned);
+      document.removeEventListener('visibilitychange', visible);
+    };
+    logUploadDiagnostic('selector-opened', { picker: marker.kind });
+  };
+  const handlePickerClick = (event: MouseEvent<HTMLInputElement>, kind: UploadPickerKind) => {
+    if (pickerLocked || busyRef.current || pickerSavingRef.current || pickerActiveRef.current) {
+      event.preventDefault();
+      return;
+    }
+    const input = event.currentTarget;
+    const ready = draftSnapshotRef.current.picker;
+    if (pickerReadyRef.current === kind && ready?.kind === kind) {
+      // Le second geste est synchrone : Safari/Android conservent l'activation
+      // native même quand la première sauvegarde a pris trop longtemps.
+      activatePicker(input, ready);
+      return;
+    }
+    event.preventDefault();
+    const persistence = draftRef.current;
+    const origin = getSupabaseClientState();
+    const userId = currentUserIdRef.current;
+    const isCurrent = () => mountedRef.current && draftRef.current === persistence
+      && currentUserIdRef.current === userId && getSupabaseClientState().generation === origin.generation;
+    const marker: UploadPickerMarker = { kind, openedAt: Date.now() };
+    const snapshot = { ...draftSnapshotRef.current, picker: marker };
+    pickerSavingRef.current = true;
+    pickerReadyRef.current = null;
+    setIsSavingPicker(true);
+    setPickerReady(null);
+    setPickerReloaded(false);
+    setErrorMessage(null);
+    setPicker(marker);
+    draftSnapshotRef.current = snapshot;
+    void (async () => {
+      try {
+        await persistDraft(snapshot);
+        if (!isCurrent()) return;
+        pickerReadyRef.current = kind;
+        setPickerReady(kind);
+        // Une ouverture automatique n'est tentée qu'avec une activation encore
+        // valide. Sinon le libellé invite à toucher de nouveau le vrai input.
+        requestAnimationFrame(() => {
+          if (!isCurrent() || !isOpenRef.current || input.disabled || pickerReadyRef.current !== kind
+            || !navigator.userActivation?.isActive || typeof input.showPicker !== 'function') return;
+          try {
+            input.showPicker();
+            activatePicker(input, marker);
+          } catch { /* Le second geste natif reste disponible, sans boucle. */ }
+        });
+      } catch (error) {
+        if (isCurrent()) setErrorMessage(userError(error,
+          'Le choix de fichier n’a pas été ouvert car le brouillon n’a pas pu être conservé. Vérifiez l’espace disponible puis réessayez.'));
+      } finally {
+        if (isCurrent()) { pickerSavingRef.current = false; setIsSavingPicker(false); }
+      }
+    })();
+  };
+
+  useEffect(() => {
+    const visibleFiles = new Set(isOpen && scopeMatches && !batch ? files : []);
+    let changed = false;
+    for (const [file, url] of localPreviewUrlsRef.current) {
+      if (visibleFiles.has(file)) continue;
+      URL.revokeObjectURL(url);
+      localPreviewUrlsRef.current.delete(file);
+      changed = true;
+    }
+    for (const [file, controller] of previewTasksRef.current) {
+      if (visibleFiles.has(file) && !isBusy && !isSavingPicker) continue;
+      controller.abort();
+      previewTasksRef.current.delete(file);
+      previewAttemptsRef.current.delete(file);
+    }
+    for (const file of previewAttemptsRef.current) {
+      if (!visibleFiles.has(file)) previewAttemptsRef.current.delete(file);
+    }
+    for (const file of durableFilesRef.current) {
+      if (!files.includes(file)) durableFilesRef.current.delete(file);
+    }
+    if (changed) setLocalPreviews(new Map(localPreviewUrlsRef.current));
+    if (isBusy || isSavingPicker || draftStatus !== 'saved' || pendingDraftRef.current) return;
+    for (const file of visibleFiles) {
+      if (!durableFilesRef.current.has(file) || previewAttemptsRef.current.has(file)) continue;
+      const mime = inferUploadMimeType(file.name, file.type);
+      const type = mime === 'application/pdf' ? 'pdf' : mime.startsWith('image/') ? 'image' : null;
+      if (!type) continue;
+      previewAttemptsRef.current.add(file);
+      const controller = new AbortController();
+      previewTasksRef.current.set(file, controller);
+      const isCurrent = () => mountedRef.current && !controller.signal.aborted
+        && previewTasksRef.current.get(file) === controller;
+      logUploadDiagnostic('preview-started');
+      void loadOptionalDocumentPreview(file, type, { signal: controller.signal, pixelRatio: 1 }).then((preview) => {
+        if (!isCurrent()) return;
+        if (!preview?.blob) { logUploadDiagnostic('preview-failed'); return; }
+        localPreviewUrlsRef.current.set(file, URL.createObjectURL(preview.blob));
+        setLocalPreviews(new Map(localPreviewUrlsRef.current));
+        logUploadDiagnostic('preview-finished');
+      }).catch(() => {
+        if (isCurrent()) logUploadDiagnostic('preview-failed');
+        // L'aperçu est facultatif : les octets conservés restent déposables.
+      }).finally(() => {
+        if (previewTasksRef.current.get(file) === controller) previewTasksRef.current.delete(file);
+      });
+    }
+  }, [files, isOpen, scopeMatches, batch, isBusy, isSavingPicker, draftStatus]);
+
   const handleFilesChosen = async (incoming: FileList | File[]) => {
-    if (busyRef.current || draftRetryRef.current || !journalReady || !scopeMatches || uploadSuccess || draftStatus !== 'saved') return;
+    if (busyRef.current || pickerSavingRef.current || pendingDraftRef.current || draftRetryRef.current || !journalReady || !scopeMatches || uploadSuccess) return;
     const selected = Array.from(incoming);
     if (!selected.length) return;
+    logUploadDiagnostic('file-received', { count: selected.length, bytes: selected.reduce((sum, file) => sum + file.size, 0) });
+    resetPicker();
     setErrorMessage(null);
     if (selected.some((file) => file.size > MAX_DOCUMENT_SIZE)) {
       setErrorMessage('Chaque fichier est limité à 20 Mo. Choisissez un fichier plus léger ; la sélection précédente est conservée.');
@@ -307,35 +525,36 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
       && draftRef.current === persistence;
     busyRef.current = true;
     setIsBusy(true);
-    setPreparationLabel(existing ? 'Vérification de votre sélection' : 'Préparation des fichiers…');
+    setPreparationLabel(existing ? 'Vérification de votre sélection' : 'Conservation des fichiers…');
     try {
       if (existing) {
         // Les octets d'une reprise ne sont jamais recompressés.
         const updated = await attachUploadFiles(existing, selected, hashUploadFile);
         if (!isCurrent()) throw new Error('Le compte du dépôt a changé pendant la sélection.');
-        await persistDraft({ ...draftSnapshotRef.current, batch: updated });
-        if (!isCurrent()) throw new Error('Le compte du dépôt a changé pendant la sauvegarde.');
-        publishBatch(updated);
-      } else {
-        const prepared: File[] = [];
-        for (let index = 0; index < selected.length; index++) {
-          setPreparationLabel(`Préparation du fichier ${index + 1} sur ${selected.length}`);
-          prepared.push(await prepareMobileUploadFile(selected[index]));
-          if (!isCurrent()) throw new Error('Le compte du dépôt a changé pendant la préparation.');
-        }
-        const nextTitles = prepared.map((file) => documentTitleFromName(file.name));
-        const snapshot = { ...draftSnapshotRef.current, files: prepared, titles: nextTitles, batch: null };
+        const snapshot = { ...draftSnapshotRef.current, batch: updated, picker: null };
+        pendingDraftRef.current = snapshot;
         await persistDraft(snapshot);
         if (!isCurrent()) throw new Error('Le compte du dépôt a changé pendant la sauvegarde.');
-        draftSnapshotRef.current = snapshot;
-        setFiles(prepared);
-        setTitles(nextTitles);
+        applyStoredDraft(snapshot);
+      } else {
+        // Normaliser le type sans décoder ni convertir les octets. La conversion
+        // coûteuse attend le dépôt explicite, après le commit du brouillon brut.
+        const raw = selected.map(normalizeUploadFile);
+        const snapshot: UploadDraftInput = { ...draftSnapshotRef.current, files: raw,
+          titles: raw.map((file) => documentTitleFromName(file.name)), filesPrepared: raw.map(() => false), batch: null, picker: null };
+        pendingDraftRef.current = snapshot;
+        await persistDraft(snapshot);
+        if (!isCurrent()) throw new Error('Le compte du dépôt a changé pendant la sauvegarde.');
+        applyStoredDraft(snapshot);
         setRestoredDraft(false);
       }
+      logUploadDiagnostic('file-saved', { count: selected.length, bytes: selected.reduce((sum, file) => sum + file.size, 0) });
     } catch (error) {
       if (isCurrent()) setErrorMessage(userError(error, existing
         ? 'Ces fichiers n’ont pas pu être repris. Choisissez les mêmes fichiers que lors du premier envoi, puis réessayez.'
-        : 'Ces fichiers n’ont pas pu être préparés ou conservés. Vérifiez leur format et l’espace disponible, puis réessayez ; votre sélection précédente est conservée.'));
+        : pendingDraftRef.current
+          ? 'Ces fichiers n’ont pas pu être conservés. Ils restent dans cette page : vérifiez l’espace disponible puis utilisez Réessayer avant de quitter.'
+          : 'Ces fichiers ne peuvent pas être déposés. Vérifiez leur format ; la sélection précédente est conservée.'));
     } finally {
       busyRef.current = false;
       if (mountedRef.current) { setIsBusy(false); setPreparationLabel(null); }
@@ -348,7 +567,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
   };
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    if (busyRef.current || draftRetryRef.current || !journalReady || !user || !scopeMatches || (!uploadSuccess && draftStatus !== 'saved')) return;
+    if (busyRef.current || pickerSavingRef.current || pendingDraftRef.current || draftRetryRef.current || !journalReady || !user || !scopeMatches || (!uploadSuccess && draftStatus !== 'saved')) return;
     if (uploadSuccess) {
       // Actualiser l'affichage ou finir le nettoyage ne recrée pas le brouillon
       // d'un lot dont la confirmation a déjà été reçue.
@@ -410,12 +629,30 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
       if (!working) {
         validateClassification(schoolName, subjectName);
         if ([...description].length > 200) throw new Error('La description ne doit pas dépasser 200 caractères.');
+        // Aucun UUID/hash n'est figé avant que les octets effectivement envoyés
+        // soient conservés. Un réessai du lot ne repasse jamais par ce bloc.
+        let snapshot = draftSnapshotRef.current;
+        const uploadFiles = [...snapshot.files];
+        const preparedFlags = snapshot.filesPrepared || uploadFiles.map(() => true);
+        if (preparedFlags.some((prepared) => !prepared)) {
+          for (let index = 0; index < uploadFiles.length; index++) {
+            if (preparedFlags[index]) continue;
+            setPreparationLabel(`Préparation du fichier ${index + 1} sur ${uploadFiles.length}`);
+            uploadFiles[index] = await prepareMobileUploadFile(uploadFiles[index]);
+            if (!isCurrent()) throw new Error('Le compte du dépôt a changé pendant la préparation.');
+          }
+          snapshot = { ...snapshot, files: uploadFiles, filesPrepared: uploadFiles.map(() => true), picker: null };
+          pendingDraftRef.current = snapshot;
+          await persistDraft(snapshot);
+          if (!isCurrent()) throw new Error('Le compte du dépôt a changé pendant la sauvegarde.');
+          applyStoredDraft(snapshot);
+        }
         const prepared = [];
-        for (let index = 0; index < files.length; index++) {
-          setPreparationLabel(`Préparation du fichier ${index + 1} sur ${files.length}`);
-          const request = await prepareUploadDocument(files[index], titles[index], description, userId, schoolName, subjectName);
+        for (let index = 0; index < uploadFiles.length; index++) {
+          setPreparationLabel(`Vérification du fichier ${index + 1} sur ${uploadFiles.length}`);
+          const request = await prepareUploadDocument(uploadFiles[index], snapshot.titles[index], description, userId, schoolName, subjectName);
           if (!isCurrent()) throw new Error('Le compte ou le projet a changé pendant la préparation. Aucun nouvel envoi n’a été démarré.');
-          prepared.push({ request, file: files[index] });
+          prepared.push({ request, file: uploadFiles[index] });
         }
         working = createUploadBatch(userId, origin.config.url, prepared);
       } else if (needsLegacyClassification(working) && legacyChoicesConfirmed) {
@@ -466,22 +703,23 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
     // la liste native aussitôt après, notamment après la caméra.
     const selected = Array.from(event.currentTarget.files || []);
     event.currentTarget.value = '';
-    void handleFilesChosen(selected);
+    if (selected.length) void handleFilesChosen(selected);
+    else resetPicker();
   };
-  const pickerLocked = isBusy || isRetryingDraft || !journalReady || !scopeMatches || uploadSuccess
+  const pickerLocked = isBusy || isRetryingDraft || isSavingPicker || !!pendingDraftRef.current || !journalReady || !scopeMatches || uploadSuccess
     || draftStatus !== 'saved' || (!!batch && !canRetryUploadBatch(batch));
 
   return (
     <>
-      {isOpen && <PendingNavigationGuard busy={isBusy} />}
+      {isOpen && <PendingNavigationGuard busy={isBusy || isSavingPicker} />}
       <AnimatePresence>
       {isOpen && (
         <div ref={viewportRef} className="fixed left-0 right-0 z-50 flex items-end justify-center overflow-hidden pt-4 md:items-center md:p-6"
           style={{ top: 'var(--dialog-viewport-top, 0px)', height: 'var(--dialog-viewport-height, 100dvh)' }}>
           <motion.div aria-hidden="true" className="fixed inset-0 bg-[#141414]/45 backdrop-blur-xs"
             initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: reduceMotion ? 0 : 0.18 }}
-            onClick={() => { if (!busyRef.current) onClose(); }} />
-          <motion.div ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="upload-title" aria-describedby="upload-help" aria-busy={isBusy} tabIndex={-1}
+            onClick={() => { if (!busyRef.current && !pickerSavingRef.current) onClose(); }} />
+          <motion.div ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="upload-title" aria-describedby="upload-help" aria-busy={isBusy || isSavingPicker} tabIndex={-1}
             initial={reduceMotion ? { opacity: 1 } : isMobile ? { y: '100%' } : { opacity: 0, y: 12, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={reduceMotion ? { opacity: 1 } : isMobile ? { y: '100%' } : { opacity: 0, y: 8 }}
@@ -495,7 +733,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                   {batch ? 'Reprenez votre envoi sans renvoyer les fichiers déjà reçus.' : 'Pour vous dès confirmation, pour les autres après approbation.'}
                 </p>
               </div>
-              <button type="button" onClick={onClose} disabled={isBusy} aria-label="Fermer le dépôt" className={`${buttonClass} shrink-0 px-2 hover:bg-[#141414]/5`}><X aria-hidden="true" size={20} /></button>
+              <button type="button" onClick={onClose} disabled={isBusy || isSavingPicker} aria-label="Fermer le dépôt" className={`${buttonClass} shrink-0 px-2 hover:bg-[#141414]/5`}><X aria-hidden="true" size={20} /></button>
             </header>
             <form onSubmit={handleSubmit} className="flex min-h-0 flex-col">
               <div className="min-h-0 space-y-4 overflow-y-auto overscroll-contain px-4 py-4 md:px-6">
@@ -518,6 +756,9 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                 {preferenceWarning && <p role="status" className="text-sm text-[#141414]/75">{preferenceWarning}</p>}
                 {batch?.notificationError && <p role="alert" className="break-words text-sm text-[#b0245e]">{batch.notificationError}</p>}
                 {!scopeMatches && batch && <p role="alert" className="text-sm text-[#b0245e]">Reconnectez-vous au compte utilisé pour ce dépôt afin de le reprendre.</p>}
+                {pickerReloaded && <p role="status" className="rounded-2xl bg-[#ffd23f]/20 p-3 text-sm">{PICKER_RELOAD_MESSAGE}</p>}
+                {pickerReady && <p role="status" className="text-sm text-[#141414]/75">Brouillon conservé. Touchez de nouveau « {pickerLabel(pickerReady)} » pour continuer.</p>}
+                {isSavingPicker && <p role="status" className="text-sm text-[#141414]/75">Conservation du brouillon avant d’ouvrir le sélecteur…</p>}
                 {restoredDraft && <p role="status" className="rounded-2xl bg-[#ffd23f]/20 p-3 text-sm">Votre brouillon a été retrouvé. Vérifiez vos choix puis reprenez l’envoi.</p>}
                 {journalReady && !uploadSuccess && <p role="status" className="text-xs text-[#141414]/65">
                   {draftStatus === 'saved' ? 'Brouillon conservé sur cet appareil.' : draftStatus === 'saving' ? 'Sauvegarde du brouillon…' : draftStatus === 'error' ? 'Le brouillon n’a pas pu être sauvegardé.' : 'Ouverture du brouillon…'}
@@ -533,9 +774,10 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                         <p className="text-sm text-[#141414]/65">Les fichiers déjà reçus ne seront pas renvoyés. Choisissez à nouveau les mêmes fichiers seulement si la reprise vous le demande.</p>
                         <div>
                           <input id={`${pickerId}-files`} type="file" multiple accept={UPLOAD_FILE_ACCEPT} className="peer sr-only"
-                            aria-label="Choisir à nouveau les fichiers du dépôt" onChange={chooseInput} disabled={pickerLocked} />
+                            aria-label="Choisir à nouveau les fichiers du dépôt" onChange={chooseInput} onClick={(event) => handlePickerClick(event, 'files')}
+                            ref={(input) => { pickerInputsRef.current.files = input; }} disabled={pickerLocked} />
                           <label htmlFor={`${pickerId}-files`} aria-disabled={pickerLocked}
-                            className={`${buttonClass} w-full touch-manipulation border border-[#141414]/20 bg-white peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[#ff6a2b] peer-disabled:cursor-not-allowed peer-disabled:opacity-50`}>Choisir à nouveau les fichiers</label>
+                            className={`${buttonClass} w-full touch-manipulation border border-[#141414]/20 bg-white peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[#ff6a2b] peer-disabled:cursor-not-allowed peer-disabled:opacity-50`}>{pickerReady === 'files' ? pickerLabel('files') : 'Choisir à nouveau les fichiers'}</label>
                         </div>
                       </>}
                     </div>
@@ -546,24 +788,27 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                       <p className="text-xs text-[#141414]/65">PDF, images, Word, PowerPoint et texte · 20 Mo par fichier</p>
                       <div>
                         <input id={`${pickerId}-files`} type="file" multiple accept={UPLOAD_FILE_ACCEPT} className="peer sr-only"
-                          aria-label={files.length ? 'Changer la sélection de fichiers' : 'Choisir des fichiers'} onChange={chooseInput} disabled={pickerLocked} />
+                          aria-label={files.length ? 'Changer la sélection de fichiers' : 'Choisir des fichiers'} onChange={chooseInput} onClick={(event) => handlePickerClick(event, 'files')}
+                          ref={(input) => { pickerInputsRef.current.files = input; }} disabled={pickerLocked} />
                         <label htmlFor={`${pickerId}-files`} aria-disabled={pickerLocked}
                           className={`${buttonClass} w-full touch-manipulation border border-[#141414]/20 bg-white peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[#ff6a2b] peer-disabled:cursor-not-allowed peer-disabled:opacity-50`}>
-                          <FileText aria-hidden="true" size={18} className="shrink-0" />Fichiers
+                          <FileText aria-hidden="true" size={18} className="shrink-0" />{pickerReady === 'files' ? pickerLabel('files') : 'Fichiers'}
                         </label>
                       </div>
                       <div className="grid grid-cols-2 gap-2 md:hidden">
                         <div className="min-w-0">
                           <input id={`${pickerId}-gallery`} type="file" accept={UPLOAD_IMAGE_ACCEPT} multiple className="peer sr-only"
-                            aria-label="Choisir des images de la galerie" onChange={chooseInput} disabled={pickerLocked} />
+                            aria-label="Choisir des images de la galerie" onChange={chooseInput} onClick={(event) => handlePickerClick(event, 'gallery')}
+                            ref={(input) => { pickerInputsRef.current.gallery = input; }} disabled={pickerLocked} />
                           <label htmlFor={`${pickerId}-gallery`} aria-disabled={pickerLocked}
                             className={`${buttonClass} w-full touch-manipulation border border-[#141414]/20 bg-white px-2 peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[#ff6a2b] peer-disabled:cursor-not-allowed peer-disabled:opacity-50`}>
-                            <Images aria-hidden="true" size={18} className="shrink-0" />Galerie
+                            <Images aria-hidden="true" size={18} className="shrink-0" />{pickerReady === 'gallery' ? pickerLabel('gallery') : 'Galerie'}
                           </label>
                         </div>
                         <div className="min-w-0">
                           <input id={`${pickerId}-camera`} type="file" accept={UPLOAD_IMAGE_ACCEPT} capture="environment" className="peer sr-only"
-                            aria-label="Prendre une photo" onChange={chooseInput} disabled={pickerLocked} />
+                            aria-label="Prendre une photo" onChange={chooseInput} onClick={(event) => handlePickerClick(event, 'camera')}
+                            ref={(input) => { pickerInputsRef.current.camera = input; }} disabled={pickerLocked} />
                           <label htmlFor={`${pickerId}-camera`} aria-disabled={pickerLocked}
                             className={`${buttonClass} w-full touch-manipulation border border-[#141414]/20 bg-white px-2 peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[#ff6a2b] peer-disabled:cursor-not-allowed peer-disabled:opacity-50`}>
                             <Camera aria-hidden="true" size={18} className="shrink-0" /><span className="min-w-0">Prendre une photo</span>
@@ -583,12 +828,14 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                         <input id={`upload-file-title-${index}`} type="text" required value={titles[index] || ''}
                           onChange={(event) => setTitles((current) => current.map((title, position) => position === index ? event.target.value : title))} className={fieldClass} />
                         <p className="mt-1 flex min-w-0 items-start gap-1 text-xs text-[#141414]/60"><FileText aria-hidden="true" size={14} className="mt-0.5 shrink-0" /><span className="min-w-0 break-all">{file.name} · {formatFileSize(file.size)}</span></p>
+                        {localPreviews.get(file) && <img src={localPreviews.get(file)} alt={`Aperçu de ${file.name}`}
+                          className="mt-2 h-24 w-20 rounded-xl bg-white object-contain" />}
                       </div>
                     ))}
                   </fieldset>
                 )}
                 {(!batch || legacyLabelsNeeded) && (
-                  <fieldset disabled={isBusy || isRetryingDraft || !journalReady || !scopeMatches} className="min-w-0 space-y-3">
+                  <fieldset disabled={isBusy || isRetryingDraft || isSavingPicker || !!pendingDraftRef.current || !journalReady || !scopeMatches} className="min-w-0 space-y-3">
                     <legend className="sr-only">École et matière</legend>
                     {legacyLabelsNeeded && <p className="rounded-2xl bg-[#ffd23f]/20 p-3 text-sm">Vous pouvez vérifier les fichiers déjà reçus. Pour terminer les autres, choisissez leur école et leur matière.</p>}
                     <div>
@@ -671,9 +918,9 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                 )}
               </div>
               <footer className="safe-bottom flex shrink-0 flex-wrap items-center gap-2 border-t border-[#141414]/10 bg-[#f1ece4] px-4 pt-3 md:px-6">
-                <button type="button" disabled={isBusy} onClick={onClose} className={`${buttonClass} bg-white/65`}>Fermer</button>
+                <button type="button" disabled={isBusy || isSavingPicker} onClick={onClose} className={`${buttonClass} bg-white/65`}>Fermer</button>
                 {(!uploadSuccess || batch?.notificationError || journalWarning || errorMessage) && <button type="submit"
-                  disabled={isBusy || !journalReady || !scopeMatches || (!uploadSuccess && draftStatus !== 'saved') || (batch ? !uploadSuccess && !canRetryUploadBatch(batch) : !files.length)}
+                  disabled={isBusy || isRetryingDraft || isSavingPicker || !!pendingDraftRef.current || !journalReady || !scopeMatches || (!uploadSuccess && draftStatus !== 'saved') || (batch ? !uploadSuccess && !canRetryUploadBatch(batch) : !files.length)}
                   className={`${buttonClass} min-w-0 flex-1 bg-[#ff6a2b] text-[#141414] hover:bg-[#ff8a4c]`}>
                   {isBusy ? 'Envoi en cours…' : uploadSuccess ? 'Réessayer' : restoredDraft ? 'Reprendre l’envoi' : batch ? 'Réessayer' : 'Déposer'}
                 </button>}

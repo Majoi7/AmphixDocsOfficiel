@@ -1,6 +1,7 @@
 import type { PDFPageProxy, RenderTask } from 'pdfjs-dist';
 import type { OpenPdf } from './pdf-runtime';
-import { checkPreviewSignal, createTaskLimiter, rasterSize } from './preview-resources';
+import { checkPreviewSignal, createTaskLimiter, rasterSize, withPreviewDeadline } from './preview-resources';
+import { loadModuleWithNotice } from './module-load-error';
 
 export interface GeneratedPreview { blob: Blob | null; pageCount: number }
 interface DecodedImage {
@@ -54,7 +55,7 @@ async function decodeImage(source: Blob, signal?: AbortSignal): Promise<DecodedI
 const browserRenderer: PreviewRenderer = {
   canvas: () => document.createElement('canvas'),
   pdf: async (source, signal) => {
-    const { openPdf } = await import('./pdf-runtime');
+    const { openPdf } = await loadModuleWithNotice(() => import('./pdf-runtime'));
     checkPreviewSignal(signal);
     return openPdf(source, signal);
   },
@@ -68,13 +69,7 @@ export function createPreviewGenerator(renderer: PreviewRenderer) {
   const limited = createTaskLimiter(2);
   return async function generate(source: Blob, fileType: string | null, options: PreviewOptions = {}): Promise<GeneratedPreview | null> {
     if (fileType !== 'pdf' && fileType !== 'image') return null;
-    return limited(async () => {
-      const controller = new AbortController();
-      const cancel = () => controller.abort();
-      options.signal?.addEventListener('abort', cancel, { once: true });
-      if (options.signal?.aborted) cancel();
-      const signal = controller.signal;
-      const timeout = setTimeout(cancel, 30_000);
+    return withPreviewDeadline((signal) => limited(async () => {
       let pdf: OpenPdf | undefined;
       let page: PDFPageProxy | undefined;
       let image: DecodedImage | undefined;
@@ -127,15 +122,13 @@ export function createPreviewGenerator(renderer: PreviewRenderer) {
         if (blob.type !== 'image/jpeg' || blob.size < 1 || blob.size > MAX_THUMBNAIL_SIZE) throw new Error('Miniature incompatible.');
         return { blob, pageCount };
       } finally {
-        clearTimeout(timeout);
-        options.signal?.removeEventListener('abort', cancel);
         signal.removeEventListener('abort', abortRender);
         if (canvas) { canvas.width = 0; canvas.height = 0; }
         image?.dispose();
         page?.cleanup();
         await pdf?.dispose().catch(() => undefined);
       }
-    }, options.signal);
+    }, signal), options.signal);
   };
 }
 export const generateDocumentPreview = createPreviewGenerator(browserRenderer);

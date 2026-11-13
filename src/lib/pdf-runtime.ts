@@ -1,17 +1,18 @@
 import type { PDFDocumentLoadingTask, PDFDocumentProxy } from 'pdfjs-dist';
 import { checkPreviewSignal } from './preview-resources';
+import { loadModuleWithNotice } from './module-load-error';
 
-// Les deux imports produisent des ressources locales distinctes. Aucun PDF ni
-// aucune URL signée ne passe par un CDN ou par le service worker de l'application.
-let runtime: Promise<typeof import('pdfjs-dist')> | undefined;
+// Runtime et worker legacy locaux, compatibles avec davantage de mobiles.
+// Un import échoué reste mémorisé jusqu'à l'actualisation manuelle, sans boucle.
+let runtime: Promise<typeof import('pdfjs-dist/legacy/build/pdf.mjs')> | undefined;
 export function loadPdfRuntime() {
   runtime ??= Promise.all([
-    import('pdfjs-dist'),
-    import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
+    loadModuleWithNotice(() => import('pdfjs-dist/legacy/build/pdf.mjs')),
+    loadModuleWithNotice(() => import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url')),
   ]).then(([pdf, worker]) => {
     pdf.GlobalWorkerOptions.workerSrc = worker.default;
     return pdf;
-  }).catch((error) => { runtime = undefined; throw error; });
+  });
   return runtime;
 }
 

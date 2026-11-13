@@ -1,7 +1,8 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
+import { writeFile } from 'node:fs/promises';
+import { defineConfig, type Plugin, type ResolvedConfig } from 'vite';
 
 import { fileURLToPath } from 'url';
 
@@ -10,13 +11,55 @@ const __dirname = path.dirname(__filename);
 
 import { VitePWA } from 'vite-plugin-pwa';
 
+// vite-plugin-pwa 2.0.0 ajoute client.navigate() à son worker selfDestroying.
+// Le remplacer APRÈS sa génération : désinscription et nettoyage uniquement,
+// sans fetch handler, clientsClaim, navigation ni rechargement des onglets.
+function retireServiceWorkerWithoutNavigation(): Plugin {
+  let config: ResolvedConfig | undefined;
+  return {
+    name: 'amphixdocs:retire-service-worker-without-navigation',
+    apply: 'build',
+    enforce: 'post',
+    configResolved(resolved) { config = resolved; },
+    closeBundle: {
+      order: 'post',
+      sequential: true,
+      async handler() {
+        if (!config || config.build.ssr) return;
+        const source = `// Worker de retrait, pas un worker hors ligne.
+self.addEventListener('install', (event) => {
+  // Activation du retrait seulement : aucun onglet n'est rechargé.
+  event.waitUntil(self.skipWaiting());
+});
+self.addEventListener('activate', (event) => {
+  event.waitUntil(Promise.all([
+    self.registration.unregister(),
+    self.caches.keys().then((names) => Promise.all(
+      names.filter((name) => name.startsWith('workbox-')
+        || name === 'google-fonts-stylesheets' || name === 'google-fonts-webfonts')
+        .map((name) => self.caches.delete(name))
+    )),
+  ]));
+});
+`;
+        await writeFile(path.resolve(config.root, config.build.outDir, 'sw.js'), source, 'utf8');
+      },
+    },
+  };
+}
+
 export default defineConfig(() => {
   return {
     plugins: [
       react(),
       tailwindcss(),
       VitePWA({
+        // Retrait temporaire : conserver le manifest, ne plus enregistrer de SW.
+        selfDestroying: true,
+        filename: 'sw.js',
+        injectRegister: false,
         registerType: 'prompt',
+        integration: { closeBundleOrder: 'pre' },
         includeAssets: ['favicon.png', 'apple-touch-icon.png', 'icon.svg'],
         manifest: {
           id: '/dashboard',
@@ -90,10 +133,11 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
+          enabled: false,
           type: 'module',
         },
       }),
+      retireServiceWorkerWithoutNavigation(),
     ],
     resolve: {
       alias: {

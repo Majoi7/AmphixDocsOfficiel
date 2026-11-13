@@ -4,6 +4,7 @@ import { getSupabaseClient, getSupabaseClientState, subscribeSupabaseClient } fr
 import { errorMessage } from './errors';
 import { assertPreviewIdentity, finishDocumentPreview, needsDocumentPreview } from './preview-completion';
 import type { GeneratedPreview } from './preview-generation';
+import { loadOptionalDocumentPreview } from './preview-loader';
 import { uploadStorageFile, type UploadProgress } from './upload-transport';
 
 export {
@@ -567,9 +568,8 @@ export async function completeDocumentPreview(
       read: () => readPreviewDocument(client, expected, check),
       source: (document) => downloadPreviewSource(client, document, check, scopedSignal),
       generate: async (blob, type, options) => {
-        const { generateDocumentPreview } = await import('./preview-generation');
         check();
-        return generateDocumentPreview(blob, type, options);
+        return loadOptionalDocumentPreview(blob, type, options);
       },
       save: async (document, preview) => { await checkRole(); return saveDocumentPreview(client, document, preview, check); },
     }, source, scopedSignal);

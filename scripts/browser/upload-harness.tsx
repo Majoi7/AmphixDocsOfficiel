@@ -4,6 +4,7 @@ import { createMemoryRouter, RouterProvider, useNavigate } from 'react-router-do
 import { UploadModal } from '../../src/components/UploadModal';
 import { readUploadDraft, saveUploadDraft, type UploadDraftInput, type UploadDraftScope } from '../../src/lib/upload-draft';
 import { readUploadJournal, serializeUploadBatch, type UploadBatchReport } from '../../src/lib/upload-batch';
+import { startUploadDiagnostics, UPLOAD_DIAGNOSTICS_KEY } from '../../src/lib/upload-diagnostics';
 import {
   failFixtureTransfer, fixtureNetworkAttempts, fixtureUser, getSupabaseClientState,
   holdFixtureTransfer, releaseFixtureTransfer, setFixtureProject, setFixtureUser, transportCalls,
@@ -73,6 +74,7 @@ const scope = (): UploadDraftScope => ({ userId: fixtureUser(), projectUrl: getS
 const draftInput = (draft: UploadDraftInput): UploadDraftInput => ({
   files: draft.files, titles: draft.titles, description: draft.description,
   schoolName: draft.schoolName, subjectName: draft.subjectName, batch: draft.batch,
+  picker: draft.picker, filesPrepared: draft.filesPrepared,
 });
 interface FixtureFile {
   name: string;
@@ -80,13 +82,15 @@ interface FixtureFile {
   type?: string;
   size?: number;
   lastModified?: number;
+  base64?: string;
 }
 function chooseFiles(specifications: FixtureFile[], picker = 'files') {
   const input = document.querySelector<HTMLInputElement>(`input[type="file"][id$="-${picker}"]`);
   if (!input || input.disabled) throw new Error('Le sélecteur réel n’est pas disponible.');
   const data = new DataTransfer();
   specifications.forEach((specification) => {
-    const bytes = specification.size === undefined ? specification.text ?? '%PDF-test-local' : new Uint8Array(specification.size);
+    const bytes = specification.base64 ? Uint8Array.from(atob(specification.base64), (character) => character.charCodeAt(0))
+      : specification.size === undefined ? specification.text ?? '%PDF-test-local' : new Uint8Array(specification.size);
     data.items.add(new File([bytes], specification.name, {
       type: specification.type ?? '', lastModified: specification.lastModified ?? 1760000000000,
     }));
@@ -136,6 +140,7 @@ const api = {
   releaseOpen: () => releaseOpen?.(),
   hasHeldOpen: () => !!releaseOpen,
   metrics: () => ({ ...metrics }),
+  diagnostics: () => JSON.parse(sessionStorage.getItem(UPLOAD_DIAGNOSTICS_KEY) || '[]') as unknown[],
   networkAttempts: fixtureNetworkAttempts,
   violations: () => [...violations],
   calls: () => structuredClone(transportCalls),
@@ -153,6 +158,7 @@ const api = {
       userId: draft.userId, projectUrl: draft.projectUrl, revision: draft.revision, files,
       titles: draft.titles, description: draft.description, schoolName: draft.schoolName, subjectName: draft.subjectName,
       batch: draft.batch ? serializeUploadBatch(draft.batch) : null,
+      picker: draft.picker, filesPrepared: draft.filesPrepared,
       attachments: draft.batch?.entries.map((entry) => ({
         id: entry.request.identity.id, name: entry.file?.name, size: entry.file?.size, type: entry.file?.type,
         status: entry.status, document: entry.document, sha256: entry.request.sha256,
@@ -176,4 +182,5 @@ declare global {
   interface Window { __uploadHarness: typeof api }
 }
 window.__uploadHarness = api;
+startUploadDiagnostics();
 createRoot(document.getElementById('root')!).render(<StrictMode><RouterProvider router={router} /></StrictMode>);

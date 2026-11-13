@@ -23,6 +23,35 @@
   </head>
   <body class="bg-[#f1ece4] text-[#141414] antialiased selection:bg-[#ff6a2b] selection:text-white overscroll-none">
     <div id="root"></div>
+    <aside id="module-load-notice" role="status" hidden style="position:fixed;left:16px;right:16px;bottom:calc(16px + env(safe-area-inset-bottom, 0px));z-index:80;max-width:420px;margin:auto;padding:16px;border-radius:20px;background:#f1ece4;color:#141414;box-shadow:0 8px 30px #14141426;font:14px 'DM Sans',sans-serif">
+      <p style="margin:0 0 12px">Une partie de l’application n’a pas pu être chargée. Ton brouillon conservé reste sur cet appareil.</p>
+      <button id="module-load-refresh" type="button" style="min-height:44px;padding:10px 18px;border:0;border-radius:999px;background:#ff6a2b;color:#141414;font:inherit;font-weight:700;cursor:pointer">Actualiser</button>
+    </aside>
+    <script>
+      // Secours installé avant le module d'entrée : même un chunk de démarrage
+      // absent laisse une action manuelle. Aucune navigation dans ces listeners.
+      (() => {
+        const notice = document.getElementById('module-load-notice');
+        const isModuleError = (cause) => /dynamically imported module|importing a module script|loading chunk|chunkloaderror|unable to preload css|failed to load module script|error loading a module/i.test(
+          typeof cause === 'string' ? cause : cause && typeof cause.message === 'string' ? cause.message : ''
+        );
+        const show = () => {
+          document.documentElement.dataset.moduleLoadError = 'true';
+          if (document.documentElement.dataset.appMounted !== 'true') notice.hidden = false;
+          window.dispatchEvent(new Event('amphixdocs:module-load-error'));
+        };
+        window.addEventListener('vite:preloadError', (event) => { event.preventDefault(); show(); });
+        window.addEventListener('error', (event) => {
+          const target = event.target;
+          if ((target instanceof HTMLScriptElement && target.type === 'module') || isModuleError(event.error || event.message)) show();
+        }, true);
+        window.addEventListener('unhandledrejection', (event) => {
+          if (isModuleError(event.reason)) { event.preventDefault(); show(); }
+        });
+        window.addEventListener('amphixdocs:app-mounted', () => { notice.hidden = true; });
+        document.getElementById('module-load-refresh').addEventListener('click', () => window.location.reload());
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

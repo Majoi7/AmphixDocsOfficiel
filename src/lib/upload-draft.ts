@@ -8,6 +8,11 @@ export interface UploadDraftScope {
   userId: string;
   projectUrl: string;
 }
+export type UploadPickerKind = 'files' | 'gallery' | 'camera';
+export interface UploadPickerMarker {
+  kind: UploadPickerKind;
+  openedAt: number;
+}
 export interface UploadDraftInput {
   files: File[];
   titles: string[];
@@ -15,6 +20,10 @@ export interface UploadDraftInput {
   schoolName: string;
   subjectName: string;
   batch: UploadBatch | null;
+  // Facultatif pour relire les brouillons V1 créés avant le marqueur.
+  picker?: UploadPickerMarker | null;
+  // Les nouveaux octets sont bruts ; une reprise figée n'est jamais recompressée.
+  filesPrepared?: boolean[];
 }
 export interface UploadDraft extends UploadDraftInput, UploadDraftScope {
   revision: number;
@@ -43,6 +52,8 @@ interface DraftRecord extends UploadDraftScope {
   subjectName: string;
   batch: string | null;
   attachments: { id: string; file: DraftFile }[];
+  picker?: UploadPickerMarker | null;
+  filesPrepared?: boolean[];
 }
 const DATABASE = 'amphixdocs-upload-drafts';
 const STORE = 'drafts';
@@ -79,6 +90,24 @@ function restoreFile(value: unknown): File {
   return new File([value.blob], value.name, { type: value.type, lastModified: value.lastModified });
 }
 
+function pickerMarker(value: unknown): UploadPickerMarker | null {
+  if (value === undefined || value === null) return null;
+  if (!record(value) || !['files', 'gallery', 'camera'].includes(String(value.kind))
+    || typeof value.openedAt !== 'number' || !Number.isFinite(value.openedAt) || value.openedAt <= 0) {
+    throw new Error('Le choix de fichier conservé ne peut pas être lu.');
+  }
+  return { kind: value.kind as UploadPickerKind, openedAt: value.openedAt };
+}
+
+function preparationFlags(value: unknown, count: number): boolean[] {
+  // Avant ce champ, la préparation précédait toujours la sauvegarde des octets.
+  if (value === undefined) return Array.from({ length: count }, () => true);
+  if (!Array.isArray(value) || value.length !== count || value.some((flag) => typeof flag !== 'boolean')) {
+    throw new Error('La préparation des fichiers du brouillon ne peut pas être lue.');
+  }
+  return [...value];
+}
+
 // Liste blanche explicite : les sessions, jetons, clés et confirmations ne sont
 // jamais enregistrés, même s'ils sont ajoutés à un objet par un appelant.
 export function encodeUploadDraft(
@@ -99,6 +128,8 @@ export function encodeUploadDraft(
     revision, updatedAt, files: input.files.map(storeFile), titles: [...input.titles],
     description: input.description, schoolName: input.schoolName, subjectName: input.subjectName,
     batch: input.batch ? serializeUploadBatch(input.batch) : null,
+    picker: pickerMarker(input.picker),
+    filesPrepared: preparationFlags(input.filesPrepared, input.files.length),
     attachments: input.batch?.entries.flatMap((entry) => entry.file
       ? [{ id: entry.request.identity.id, file: storeFile(entry.file) }] : []) || [],
   };
@@ -136,6 +167,8 @@ export function decodeUploadDraft(scope: UploadDraftScope, value: unknown): Uplo
     userId: scope.userId, projectUrl: scope.projectUrl, revision: value.revision, updatedAt: value.updatedAt,
     files, titles: value.titles as string[], description: value.description,
     schoolName: value.schoolName, subjectName: value.subjectName, batch,
+    picker: pickerMarker(value.picker),
+    filesPrepared: preparationFlags(value.filesPrepared, files.length),
   };
 }
 
@@ -323,7 +356,9 @@ async function sameDraftForm(
   left: UploadDraftInput, right: UploadDraftInput, hashFile: (file: Blob) => Promise<string>,
 ): Promise<boolean> {
   if (left.description !== right.description || left.schoolName !== right.schoolName
-    || left.subjectName !== right.subjectName || left.files.length !== right.files.length
+    || left.subjectName !== right.subjectName || JSON.stringify(left.picker ?? null) !== JSON.stringify(right.picker ?? null)
+    || JSON.stringify(preparationFlags(left.filesPrepared, left.files.length)) !== JSON.stringify(preparationFlags(right.filesPrepared, right.files.length))
+    || left.files.length !== right.files.length
     || left.titles.length !== right.titles.length || left.titles.some((title, index) => title !== right.titles[index])) return false;
   for (let index = 0; index < left.files.length; index++) {
     const file = left.files[index];
@@ -351,6 +386,8 @@ export function createUploadDraftPersistence(scope: UploadDraftScope, factory?: 
   const remember = (draft: UploadDraft | null) => {
     revision = draft?.revision ?? null;
     lastDraft = draft && { ...draft, files: [...draft.files], titles: [...draft.titles],
+      picker: draft.picker ? { ...draft.picker } : null,
+      filesPrepared: preparationFlags(draft.filesPrepared, draft.files.length),
       batch: draft.batch ? restoreUploadBatch(serializeUploadBatch(draft.batch), captured.userId, captured.projectUrl) : null };
     loaded = true;
   };
@@ -362,7 +399,9 @@ export function createUploadDraftPersistence(scope: UploadDraftScope, factory?: 
       return draft;
     }),
     save: (input: UploadDraftInput, isCurrent: () => boolean = () => true) => {
-      const snapshot = { ...input, files: [...input.files], titles: [...input.titles] };
+      const snapshot = { ...input, files: [...input.files], titles: [...input.titles],
+        picker: input.picker ? { ...input.picker } : null,
+        filesPrepared: preparationFlags(input.filesPrepared, input.files.length) };
       return enqueue(async () => {
         if (!loaded) throw new Error('Le brouillon précédent doit d’abord être vérifié.');
         const saved = await saveUploadDraft(captured, snapshot, revision, factory, isCurrent);
@@ -371,7 +410,9 @@ export function createUploadDraftPersistence(scope: UploadDraftScope, factory?: 
       });
     },
     retry: (input: UploadDraftInput, options: UploadDraftRetryOptions) => {
-      const snapshot = { ...input, files: [...input.files], titles: [...input.titles] };
+      const snapshot = { ...input, files: [...input.files], titles: [...input.titles],
+        picker: input.picker ? { ...input.picker } : null,
+        filesPrepared: preparationFlags(input.filesPrepared, input.files.length) };
       return enqueue(async () => {
         if (!loaded) throw new Error('Le brouillon précédent doit d’abord être vérifié.');
         assertCurrentDraft(options.isCurrent);

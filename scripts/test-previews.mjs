@@ -178,6 +178,58 @@ test('limiteur : une tâche annulée en attente ne démarre jamais', async () =>
   assert.equal(calls, 1);
 });
 
+test('échéance : un import suspendu rend la main, sans résultat tardif ni rejet non traité', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const gate = deferred();
+  let signal;
+  const job = resources.withPreviewDeadline((current) => { signal = current; return gate.promise; });
+  const rejection = assert.rejects(job, { name: 'AbortError' });
+  await tick();
+  assert.equal(signal.aborted, false);
+  t.mock.timers.tick(resources.PREVIEW_TIMEOUT_MS);
+  await rejection;
+  assert.equal(signal.aborted, true);
+  gate.reject(new Error('Import tardivement refusé.'));
+  await tick();
+});
+
+test('échéance : un signal déjà annulé n’alloue aucune ressource', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let started = false;
+  await assert.rejects(resources.withPreviewDeadline(async () => { started = true; }, controller.signal), { name: 'AbortError' });
+  assert.equal(started, false);
+});
+
+test('échéance : un rendu suspendu conserve sa place et les tâches en attente expirent', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const fixture = rendererFixture();
+  const gates = [];
+  let closed = 0;
+  fixture.renderer.image = async () => {
+    const gate = deferred();
+    gates.push(gate);
+    await gate.promise;
+    return { source: {}, width: 1200, height: 800, dispose: () => { closed++; } };
+  };
+  const generate = generation.createPreviewGenerator(fixture.renderer);
+  const pending = [generate(source, 'image'), generate(source, 'image'), generate(source, 'image')];
+  const rejected = pending.map((job) => assert.rejects(job, { name: 'AbortError' }));
+  await tick();
+  assert.equal(gates.length, 2);
+  t.mock.timers.tick(resources.PREVIEW_TIMEOUT_MS);
+  await Promise.all(rejected);
+  const fourth = assert.rejects(generate(source, 'image'), { name: 'AbortError' });
+  await tick();
+  assert.equal(gates.length, 2, 'Une échéance ne doit pas libérer un worker encore actif.');
+  t.mock.timers.tick(resources.PREVIEW_TIMEOUT_MS);
+  await fourth;
+  gates.forEach((gate) => gate.resolve());
+  await tick();
+  assert.equal(closed, 2);
+  assert.equal(fixture.canvases.length, 0, 'Aucun canvas ne doit être alloué après annulation.');
+});
+
 // Génération : vrai orchestrateur avec canvas et moteur PDF simulés.
 test('PDF : page 1 seulement, numPages, JPEG 0,8 puis libération canvas/page/document', async () => {
   const fixture = rendererFixture();

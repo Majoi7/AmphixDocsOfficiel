@@ -250,6 +250,43 @@ test('encodage puis décodage gardent les octets et toutes les saisies', async (
   assert.deepEqual(await value.files[0].arrayBuffer(), await source.files[0].arrayBuffer());
 });
 
+test('marqueur du sélecteur et octets bruts conservés, avec compatibilité des anciens brouillons', () => {
+  const picker = { kind: 'camera', openedAt: lastModified, secret: 'DONNEE_A_EXCLURE' };
+  const value = encoded({ picker, filesPrepared: [false] });
+  const restored = draft.decodeUploadDraft(scope, value);
+  assert.deepEqual(restored.picker, { kind: 'camera', openedAt: lastModified });
+  assert.deepEqual(restored.filesPrepared, [false]);
+  assert.doesNotMatch(JSON.stringify(value), /DONNEE_A_EXCLURE|secret/);
+  const { picker: _picker, filesPrepared: _flags, ...legacy } = encoded();
+  const old = draft.decodeUploadDraft(scope, legacy);
+  assert.equal(old.picker, null);
+  assert.deepEqual(old.filesPrepared, [true], 'Un brouillon historique contient déjà les octets préparés.');
+});
+
+test('marqueur ou préparation corrompus refusés plutôt que réinitialisés', () => {
+  for (const picker of [{ kind: 'inconnu', openedAt: lastModified }, { kind: 'files', openedAt: 0 }, { kind: 'gallery', openedAt: NaN }, 'files']) {
+    assert.throws(() => encoded({ picker }), /choix de fichier/);
+    assert.throws(() => draft.decodeUploadDraft(scope, { ...encoded(), picker }), /choix de fichier/);
+  }
+  for (const filesPrepared of [[], [true, false], [1], null, 'true']) {
+    assert.throws(() => encoded({ filesPrepared }), /préparation des fichiers/);
+    assert.throws(() => draft.decodeUploadDraft(scope, { ...encoded(), filesPrepared }), /préparation des fichiers/);
+  }
+});
+
+test('la file copie le marqueur et les indicateurs avant toute attente', async () => {
+  const memory = memoryIndexedDb();
+  const persistence = draft.createUploadDraftPersistence(scope, memory.factory);
+  await persistence.read();
+  const selected = input({ picker: { kind: 'files', openedAt: lastModified }, filesPrepared: [false] });
+  const saving = persistence.save(selected);
+  selected.picker.kind = 'camera';
+  selected.filesPrepared[0] = true;
+  const stored = await saving;
+  assert.deepEqual(stored.picker, { kind: 'files', openedAt: lastModified });
+  assert.deepEqual(stored.filesPrepared, [false]);
+});
+
 test('la liste blanche exclut clés, session, profil et confirmations locales', async () => {
   const confirmed = await complete(batch());
   confirmed.session = { access_token: 'JETON_FICTIF_A_NE_PAS_CONSERVER' };
@@ -258,7 +295,7 @@ test('la liste blanche exclut clés, session, profil et confirmations locales', 
     batch: confirmed, access_token: 'JETON_FICTIF_A_NE_PAS_CONSERVER', apiKey: 'CLE_FICTIVE', profile: { email: 'test@example.invalid' },
   }), 1);
   assert.deepEqual(Object.keys(value).sort(), [
-    'attachments', 'batch', 'description', 'files', 'key', 'projectUrl', 'revision', 'schoolName', 'subjectName', 'titles', 'updatedAt', 'userId', 'version',
+    'attachments', 'batch', 'description', 'files', 'filesPrepared', 'key', 'picker', 'projectUrl', 'revision', 'schoolName', 'subjectName', 'titles', 'updatedAt', 'userId', 'version',
   ]);
   assert.doesNotMatch(JSON.stringify(value), /JETON_FICTIF|CLE_FICTIVE|PROFIL_FICTIF|access_token|confirmed|test@example/);
   const restored = draft.decodeUploadDraft(scope, structuredClone(value));

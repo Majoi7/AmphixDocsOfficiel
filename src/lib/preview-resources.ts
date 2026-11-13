@@ -27,6 +27,39 @@ export function createTaskLimiter(limit: number) {
   };
 }
 
+export const PREVIEW_TIMEOUT_MS = 8_000;
+
+// La borne commence avant la file et les imports. L'appelant reprend la main
+// même si un import ou un nettoyage ne termine pas ; le travail encore actif
+// conserve sa place dans le limiteur, pour ne pas multiplier les workers.
+export function withPreviewDeadline<T>(work: (signal: AbortSignal) => Promise<T>, parent?: AbortSignal): Promise<T> {
+  const controller = new AbortController();
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (done: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      parent?.removeEventListener('abort', abort);
+      done();
+    };
+    const abort = () => {
+      controller.abort();
+      finish(() => reject(new DOMException('Opération annulée.', 'AbortError')));
+    };
+    const timer = setTimeout(abort, PREVIEW_TIMEOUT_MS);
+    parent?.addEventListener('abort', abort, { once: true });
+    if (parent?.aborted) { abort(); return; }
+    void Promise.resolve().then(() => {
+      checkPreviewSignal(controller.signal);
+      return work(controller.signal);
+    }).then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
 export function checkPreviewSignal(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException('Opération annulée.', 'AbortError');
 }
