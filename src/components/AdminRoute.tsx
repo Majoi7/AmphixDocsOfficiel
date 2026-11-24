@@ -35,7 +35,9 @@ export const AdminRoute: React.FC<{ children: React.ReactNode }> = ({ children }
     );
   }
 
-  if (loading) {
+  // Garder un accès admin déjà résolu pendant une revalidation. Un premier
+  // rôle inconnu, une erreur ou une révocation restent bloquants.
+  if (loading && (!user || !isAdmin)) {
     return (
       <div role="status" className="min-h-dvh bg-[#f1ece4] flex flex-col items-center justify-center p-6">
         <Loader2 className={`w-8 h-8 text-[#ff6a2b] mb-3 ${reducedMotion ? '' : 'animate-spin'}`} aria-hidden="true" />

@@ -6,6 +6,7 @@
 import React from 'react';
 import { createBrowserRouter, RouterProvider, Outlet, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { UploadProvider } from './context/UploadContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { PageTransitionOverlay } from './components/PageTransitionOverlay';
 import { SupabaseConfigModal } from './components/SupabaseConfigModal';
@@ -25,7 +26,7 @@ function AppContent() {
   // Une coupure réseau ne démonte ni le dashboard ni son formulaire. Le
   // brouillon et les fichiers restent disponibles pour un nouvel essai.
   return (
-    <>
+    <UploadProvider>
       {!isOnline && <p role="status" className="fixed inset-x-4 top-4 z-[45] mx-auto max-w-md rounded-2xl bg-[#141414] p-3 text-center text-sm text-[#f1ece4]">
         Vous êtes hors ligne. Retrouvez une connexion pour envoyer vos fichiers.
       </p>}
@@ -37,7 +38,7 @@ function AppContent() {
       <UpdateToast />
       <InstallPrompt />
       <Outlet />
-    </>
+    </UploadProvider>
   );
 }
 

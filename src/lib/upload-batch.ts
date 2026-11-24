@@ -2,6 +2,7 @@ import type { DocumentItem, UploadDocumentRequest, UploadFailureKind, UploadStag
 import type { UploadProgress } from './upload-transport';
 import { logDevelopmentError, userError } from './errors';
 import { assertPreviewIdentity, needsDocumentPreview } from './preview-completion';
+import { isUploadIdentityPath, matchesUploadFileName } from './upload-files';
 
 export type BatchEntryStatus = 'pending' | 'working' | 'confirmed' | 'error';
 export interface UploadBatchEntry {
@@ -206,7 +207,7 @@ export async function attachUploadFiles(
   const attachments = new Map<string, File>();
   for (const file of incoming) {
     const candidates = batch.entries.filter((entry) => entry.status !== 'confirmed'
-      && entry.request.fileName === file.name && entry.request.fileSize === file.size);
+      && matchesUploadFileName(entry.request.fileName, file.name) && entry.request.fileSize === file.size);
     if (candidates.length === 0) throw new Error(`« ${file.name} » ne correspond à aucun fichier restant de ce lot.`);
     const hash = await hashFile(file);
     const matches = candidates.filter((entry) => entry.request.sha256 === hash);
@@ -242,7 +243,7 @@ function validIdentity(value: unknown): value is Record<string, unknown> & Pick<
     || !Number.isSafeInteger(value.fileSize) || value.fileSize < 0 || value.fileSize > 20 * 1024 * 1024
     || !['pdf', 'image', 'doc', 'autre'].includes(String(value.fileType))
     || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256)) return false;
-  return value.identity.filePath === `${value.userId}/${value.identity.id}-${value.fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+  return isUploadIdentityPath(value.fileName, value.userId, value.identity.id, value.identity.filePath);
 }
 function identityData(request: Pick<UploadDocumentRequest,
   'identity' | 'userId' | 'title' | 'description' | 'fileName' | 'fileSize' | 'fileType' | 'sha256'>) {

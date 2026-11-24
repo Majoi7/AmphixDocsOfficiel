@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { createBrowserRouter, RouterProvider } from 'react-router-dom';
+import { createBrowserRouter, RouterProvider, Outlet } from 'react-router-dom';
+import { UploadProvider } from '../../src/context/UploadContext';
 import { DashboardPage } from '../../src/pages/DashboardPage';
 import { DeferredPdfViewer } from '../../src/components/DocumentFileViewer';
 import { fixtureApi, fixtureFetch } from './leo-mocks';
@@ -25,11 +26,14 @@ const fixtureLoader = async () => {
 // Le transport et les hooks Léo restent ceux de production. Seules leurs
 // frontières externes sont simulées ; CSP et CDP bloquent aussi tout réseau.
 window.fetch = fixtureFetch;
-const router = createBrowserRouter([
-  { path: '/dashboard', element: <DashboardPage /> },
-  { path: '/preview-loader', element: <DeferredPdfViewer source={loaderSource} load={fixtureLoader} /> },
-  { path: '/', element: <p>Recette locale : le dashboard est démonté.</p> },
-]);
+const router = createBrowserRouter([{
+  element: <UploadProvider><Outlet /></UploadProvider>,
+  children: [
+    { path: '/dashboard', element: <DashboardPage /> },
+    { path: '/preview-loader', element: <DeferredPdfViewer source={loaderSource} load={fixtureLoader} /> },
+    { path: '/', element: <p>Recette locale : le dashboard est démonté.</p> },
+  ],
+}]);
 const api = {
   ...fixtureApi,
   loader: () => ({ calls: loaderCalls, mode: loaderMode }),

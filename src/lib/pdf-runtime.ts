@@ -22,26 +22,32 @@ export interface OpenPdf {
 }
 export async function openPdf(blob: Blob, signal?: AbortSignal): Promise<OpenPdf> {
   checkPreviewSignal(signal);
-  const [pdf, buffer] = await Promise.all([loadPdfRuntime(), blob.arrayBuffer()]);
+  const pdf = await loadPdfRuntime();
   checkPreviewSignal(signal);
+  // pdf.js lit le Blob via une URL locale : aucune copie complète ArrayBuffer
+  // sur le thread principal avant le démarrage du worker.
+  const url = URL.createObjectURL(blob);
   let task: PDFDocumentLoadingTask | undefined;
   let closing: Promise<void> | undefined;
   const dispose = (): Promise<void> => {
     signal?.removeEventListener('abort', abort);
     if (closing) return closing;
-    const pending: Promise<void> = task ? task.destroy() : Promise.resolve();
-    closing = pending;
-    return pending;
+    closing = (async () => {
+      try { await task?.destroy(); }
+      finally { URL.revokeObjectURL(url); }
+    })();
+    return closing;
   };
   const abort = () => { void dispose().catch(() => undefined); };
-  task = pdf.getDocument({
-    data: new Uint8Array(buffer), enableXfa: false,
-    useSystemFonts: true, maxImageSize: 16_000_000,
-  });
-  // Pas de mot de passe collecté ou mémorisé : téléchargement toujours proposé.
-  task.onPassword = () => { void dispose().catch(() => undefined); };
-  signal?.addEventListener('abort', abort, { once: true });
   try {
+    task = pdf.getDocument({
+      url, enableXfa: false,
+      useSystemFonts: true, maxImageSize: 16_000_000,
+    });
+    // Pas de mot de passe collecté ou mémorisé : téléchargement toujours proposé.
+    task.onPassword = () => { void dispose().catch(() => undefined); };
+    signal?.addEventListener('abort', abort, { once: true });
+    checkPreviewSignal(signal);
     const document = await task.promise;
     checkPreviewSignal(signal);
     if (!Number.isSafeInteger(document.numPages) || document.numPages < 1) throw new Error('PDF sans page lisible.');

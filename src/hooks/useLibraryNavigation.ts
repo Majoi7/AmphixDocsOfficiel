@@ -26,7 +26,10 @@ export function useLibraryNavigation() {
   return {
     ...current,
     selectView: (view: DashboardView) => {
-      const target = dashboardUrl(view, { query: view === current.view ? current.query : undefined });
+      const target = dashboardUrl(view, {
+        query: location.pathname === '/dashboard' ? current.query : undefined,
+        showTrash: view === 'explore' && current.showTrash,
+      });
       if (target !== href) void navigate(target, { replace: hasOverlay });
     },
     openPanel: (panel: LibraryPanel) => {
@@ -53,8 +56,15 @@ export function useLibraryNavigation() {
     },
     closePanel: closeOverlay,
     closeDocument: closeOverlay,
-    setQuery: (query: string) => void navigate(dashboardUrl(current.view === 'home' ? 'search' : current.view,
-      { query, showTrash: current.showTrash }), { replace: true }),
+    setQuery: (query: string) => {
+      const params = new URLSearchParams(location.search);
+      if (query) params.set('q', query); else params.delete('q');
+      const search = params.toString();
+      void navigate(`${location.pathname}${search ? `?${search}` : ''}`, {
+        replace: true,
+        state: location.state,
+      });
+    },
     setShowTrash: (showTrash: boolean) => {
       const target = dashboardUrl('explore', { query: current.query, showTrash });
       if (target !== href) void navigate(target);

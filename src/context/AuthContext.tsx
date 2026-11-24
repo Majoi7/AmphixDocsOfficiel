@@ -176,7 +176,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <AuthContext.Provider value={{
       ...currentAuth,
       isAdmin: currentAuth.roleStatus === 'ready' && currentAuth.userRole === 'admin',
-      loading: currentAuth.sessionStatus === 'loading' || currentAuth.roleStatus === 'loading',
+      // Le contrôleur conserve user/role pendant une revalidation du même
+      // compte : seul un compte non encore résolu bloque les gardes.
+      loading: (currentAuth.sessionStatus === 'loading' || currentAuth.roleStatus === 'loading')
+        && !(currentAuth.user && currentAuth.userRole !== null),
       sessionLoading: currentAuth.sessionStatus === 'loading',
       roleLoading: currentAuth.roleStatus === 'loading',
       isConfigured: config.isConfigured,

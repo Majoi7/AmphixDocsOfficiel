@@ -1,6 +1,7 @@
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
 import type { Database, UserRole } from './database.types';
 import { errorMessage, userError } from './errors';
+import { logUploadDiagnostic } from './upload-diagnostics';
 
 export interface AuthSnapshot {
   generation: number;
@@ -37,17 +38,21 @@ export function createAuthSessionController({ client, generation, loadRole, publ
 }) {
   let disposed = false;
   let sessionRevision = 0;
+  let restorationRevision = 0;
   let roleRevision = 0;
   // L’identité annoncée par Auth reste connue pendant getUser/loadRole,
   // même lorsque le snapshot masque encore l’utilisateur non vérifié.
   let sessionAccountId: string | null = null;
   let accountRevision = 0;
   let signOutTask: { revision: number; result: Promise<SignOutResult> } | null = null;
+  // Ref par valeur : connue aussi pendant la première vérification du compte.
+  const currentUserIdRef: { current: string | null } = { current: null };
   let snapshot = emptyAuthSnapshot(generation, true);
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const active = () => !disposed && isCurrent();
   const update = (next: AuthSnapshot) => {
-    if (!active()) return;
+    if (!active() || (Object.keys(next) as (keyof AuthSnapshot)[])
+      .every((key) => snapshot[key] === next[key])) return;
     snapshot = next;
     publish(next);
   };
@@ -58,7 +63,10 @@ export function createAuthSessionController({ client, generation, loadRole, publ
 
   async function resolveRole(userId: string, sessionVersion: number): Promise<void> {
     const roleVersion = ++roleRevision;
-    update({ ...snapshot, userRole: null, roleStatus: 'loading', roleError: null });
+    // Une revalidation explicite garde le dernier rôle résolu. Les événements
+    // Auth du même compte ne passent jamais par ce chargement.
+    const revalidating = snapshot.roleStatus === 'ready' && snapshot.userRole !== null;
+    if (!revalidating) update({ ...snapshot, userRole: null, roleStatus: 'loading', roleError: null });
     const current = () => active() && sessionRevision === sessionVersion
       && roleRevision === roleVersion && snapshot.user?.id === userId;
     try {
@@ -94,34 +102,56 @@ export function createAuthSessionController({ client, generation, loadRole, publ
   function acceptSession(session: Session | null) {
     if (!active()) return;
     const accountId = session?.user.id ?? null;
+    if (accountId === currentUserIdRef.current && (session || snapshot.sessionStatus === 'ready')) {
+      // SIGNED_IN, TOKEN_REFRESHED, USER_UPDATED et INITIAL_SESSION peuvent
+      // réémettre le même compte au retour du sélecteur. Aucun setState, aucun
+      // getUser/loadRole ni remplacement de l'objet user pour cette notification.
+      return;
+    }
+    currentUserIdRef.current = accountId;
     if (accountId !== sessionAccountId) {
       sessionAccountId = accountId;
       ++accountRevision;
     }
     const version = ++sessionRevision;
+    ++restorationRevision;
     ++roleRevision;
     update({ ...emptyAuthSnapshot(generation, true), sessionStatus: session ? 'loading' : 'ready' });
     if (session) schedule(() => { void verifySession(session, version); });
   }
 
   async function restoreSession(reset: boolean): Promise<void> {
-    const version = reset ? ++sessionRevision : sessionRevision;
-    if (reset) {
+    // Les notifications du même compte ne doivent pas annuler une vérification
+    // en cours, mais leur arrivée rend une ancienne lecture getSession obsolète.
+    const readVersion = ++restorationRevision;
+    const revalidating = reset && snapshot.sessionStatus === 'ready' && snapshot.user !== null;
+    const version = reset && !revalidating ? ++sessionRevision : sessionRevision;
+    if (reset && !revalidating) {
       ++roleRevision;
+      currentUserIdRef.current = null;
       update(emptyAuthSnapshot(generation, true));
     }
     try {
       const { data, error } = await client.auth.getSession();
-      if (!active() || version !== sessionRevision) return;
+      if (!active() || version !== sessionRevision || readVersion !== restorationRevision) return;
       if (error) throw new Error(`Impossible de restaurer la session : ${errorMessage(error)}`);
+      if (revalidating && data.session?.user.id === currentUserIdRef.current) return;
       acceptSession(data.session);
     } catch (error) {
-      if (!active() || version !== sessionRevision) return;
+      if (!active() || version !== sessionRevision || readVersion !== restorationRevision) return;
       update({ ...emptyAuthSnapshot(generation, true), sessionStatus: 'error', sessionError: userError(error, 'Votre connexion n’a pas pu être rétablie. Réessayez.') });
     }
   }
 
-  const { data: { subscription } } = client.auth.onAuthStateChange((_event, session) => acceptSession(session));
+  const { data: { subscription } } = client.auth.onAuthStateChange((event, session) => {
+    logUploadDiagnostic('auth-event', { authEvent: event });
+    // Une notification sans session autre que SIGNED_OUT n'est pas la preuve
+    // d'une déconnexion. SIGNED_OUT et un vrai changement de compte invalidant
+    // la session gardent, eux, leur comportement de sécurité.
+    if (currentUserIdRef.current && !session && event !== 'SIGNED_OUT') return;
+    ++restorationRevision;
+    acceptSession(event === 'SIGNED_OUT' ? null : session);
+  });
   // Une notification reçue après le départ de cette lecture invalide sa réponse.
   void restoreSession(false);
 
@@ -136,6 +166,7 @@ export function createAuthSessionController({ client, generation, loadRole, publ
     dispose: () => {
       disposed = true;
       ++sessionRevision;
+      ++restorationRevision;
       ++roleRevision;
       for (const timer of timers) clearTimeout(timer);
       timers.clear();

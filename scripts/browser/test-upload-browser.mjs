@@ -431,13 +431,52 @@ test('FileList copiée, MIME PDF déduit et saisies/octets restaurés après rec
   assert.equal((await api('calls')).length, 0);
 });
 
+test('retour de visibilité et re-rendu : même input, mêmes fichiers, aucun faux rechargement', async () => {
+  await form(22);
+  await activateChooser();
+  const previous = await api('readDraft');
+  assert.equal(previous.picker.pageLoadId, await api('pageLoadId'));
+  await evaluate(`window.__stablePickerInput = document.querySelector('input[type="file"][id$="-files"]')`);
+  await api('rerender');
+  await evaluate('document.dispatchEvent(new Event("visibilitychange")); window.dispatchEvent(new Event("focus"))');
+  assert.equal(await evaluate(`window.__stablePickerInput === document.querySelector('input[type="file"][id$="-files"]')`), true);
+  assert.equal(await evaluate('/La page s.est rechargée/.test(document.body.textContent)'), false);
+  const returned = (await api('diagnostics')).findLast((entry) => entry.event === 'selector-returned');
+  assert.equal(returned.previousPageLoadId, returned.pageLoadId);
+  await api('chooseFiles', [{ name: 'nouveau.txt', text: 'nouveaux octets', type: 'text/plain' }]);
+  await saved({ picker: null, titles: ['nouveau'] });
+  const current = await api('readDraft');
+  assert.equal(current.schoolName, previous.schoolName);
+  assert.equal(current.subjectName, previous.subjectName);
+  assert.equal(await evaluate(`document.querySelector('input[type="file"][id$="-files"]').value`), '');
+});
+
+test('remontage React volontaire : identifiant de page inchangé, pas de message de rechargement', async () => {
+  await form(23);
+  await activateChooser('gallery');
+  const previous = await api('readDraft');
+  assert.ok(previous.picker.pageLoadId);
+  await api('remount');
+  await waitFor('document.body.textContent.includes("Brouillon conservé sur cet appareil.")', 'restauration après remontage');
+  assert.equal(await evaluate('/La page s.est rechargée/.test(document.body.textContent)'), false);
+  assert.deepEqual((await api('readDraft')).files, previous.files);
+  const restored = (await api('diagnostics')).findLast((entry) => entry.event === 'selector-restored');
+  assert.equal(restored.pageLoadId, previous.picker.pageLoadId);
+  assert.equal(restored.previousPageLoadId, restored.pageLoadId);
+});
+
 test('sélecteur interrompu : marqueur conservé avant ouverture et message après rechargement', async () => {
   await form(17);
   const previous = (await api('readDraft')).files;
   await activateChooser('gallery');
-  assert.equal((await api('readDraft')).picker.kind, 'gallery');
+  const marker = (await api('readDraft')).picker;
+  assert.equal(marker.kind, 'gallery');
+  assert.ok(marker.pageLoadId);
   await reload();
   await open();
+  const restored = (await api('diagnostics')).findLast((entry) => entry.event === 'selector-restored');
+  assert.notEqual(restored.pageLoadId, marker.pageLoadId);
+  assert.equal(restored.previousPageLoadId, marker.pageLoadId);
   assert.equal(await evaluate('document.body.textContent.includes("La page s\\\'est rechargée pendant le choix du fichier")'), true);
   assert.deepEqual((await api('readDraft')).files, previous);
   await api('chooseFiles', [{ name: 'nouveau.txt', text: 'nouveaux octets', type: 'text/plain' }]);

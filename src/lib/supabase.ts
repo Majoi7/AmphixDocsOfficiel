@@ -6,6 +6,8 @@ import { assertPreviewIdentity, finishDocumentPreview, needsDocumentPreview } fr
 import type { GeneratedPreview } from './preview-generation';
 import { loadOptionalDocumentPreview } from './preview-loader';
 import { uploadStorageFile, type UploadProgress } from './upload-transport';
+import { isUploadIdentityPath, matchesUploadFileName, normalizeUploadFileName, uploadStoragePath } from './upload-files';
+import { hashUploadBlob } from './upload-hash';
 
 export {
   getStoredSupabaseConfig, isSupabaseConfigured, reinitializeSupabase,
@@ -163,11 +165,10 @@ export class DocumentUploadError extends Error {
   }
 }
 class UploadScopeError extends Error {}
-export function createUploadIdentity(file: Pick<File, 'name'>, userId: string, id: string = crypto.randomUUID()): UploadIdentity {
+export function createUploadIdentity(_file: Pick<File, 'name'>, userId: string, id: string = crypto.randomUUID()): UploadIdentity {
   assertUuid(userId, 'Identifiant du compte');
   assertUuid(id, 'Identifiant du dépôt');
-  const safeName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_');
-  return { id, filePath: `${userId}/${id}-${safeName}` };
+  return { id, filePath: uploadStoragePath(userId, id) };
 }
 function validateDocumentFields(title: string, description: string) {
   if (!title.trim()) throw new Error('Le titre du fichier est obligatoire.');
@@ -182,8 +183,7 @@ export function validateClassification(schoolName: string, subjectName: string):
 export async function hashUploadFile(file: Blob): Promise<string> {
   if (file.size > MAX_DOCUMENT_SIZE) throw new Error('Le fichier dépasse la limite de 20 Mo.');
   if (!globalThis.crypto?.subtle) throw new Error('La vérification du contenu nécessite un navigateur sécurisé (HTTPS ou localhost). Aucun dépôt n’a été démarré.');
-  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return hashUploadBlob(file);
 }
 export async function prepareUploadDocument(
   file: File, title: string, description: string, userId: string,
@@ -193,14 +193,17 @@ export async function prepareUploadDocument(
   validateClassification(schoolName, subjectName);
   if (!file.name) throw new Error('Le fichier doit avoir un nom.');
   return { identity: createUploadIdentity(file, userId, id), userId,
-    title: title.trim(), description: description.trim(), fileName: file.name, fileSize: file.size,
+    title: title.trim(), description: description.trim(), fileName: normalizeUploadFileName(file.name), fileSize: file.size,
     fileType: detectFileCategory(file.name, file.type), sha256: await hashUploadFile(file),
     schoolName: schoolName.trim(), subjectName: subjectName.trim() };
 }
 function validateUploadRequest(request: UploadDocumentRequest): void {
   validateDocumentFields(request.title, request.description);
-  const expected = createUploadIdentity({ name: request.fileName }, request.userId, request.identity.id);
-  if (!request.fileName || request.identity.filePath !== expected.filePath) throw new Error('L’identité du dépôt ne correspond pas au fichier et à son propriétaire.');
+  assertUuid(request.userId, 'Identifiant du compte');
+  assertUuid(request.identity.id, 'Identifiant du dépôt');
+  if (!request.fileName || !isUploadIdentityPath(request.fileName, request.userId, request.identity.id, request.identity.filePath)) {
+    throw new Error('L’identité du dépôt ne correspond pas au fichier et à son propriétaire.');
+  }
   if (!Number.isSafeInteger(request.fileSize) || request.fileSize < 0 || request.fileSize > MAX_DOCUMENT_SIZE) throw new Error('La taille du fichier est invalide ou dépasse 20 Mo.');
   if (!/^[a-f0-9]{64}$/.test(request.sha256)) throw new Error('L’empreinte du fichier est absente ou invalide. Le dépôt ne peut pas être repris sans vérification.');
   if (!['pdf', 'image', 'doc', 'autre'].includes(request.fileType)) throw new Error('Le type du fichier est invalide.');
@@ -375,7 +378,7 @@ export async function resumeUserDocument(
       const stored = mode === 'resume' ? await verifyStorage() : 'missing';
       if (stored !== 'present') {
         if (!file) throw failure(`Resélectionnez « ${request.fileName} » pour reprendre son transfert. L’identité précédente est conservée.`, 'retryable');
-        if (file.name !== request.fileName || file.size !== request.fileSize || await hashUploadFile(file) !== request.sha256) {
+        if (!matchesUploadFileName(request.fileName, file.name) || file.size !== request.fileSize || await hashUploadFile(file) !== request.sha256) {
           throw failure('Le fichier resélectionné ne correspond pas à l’original (nom, taille ou contenu). Aucun nouvel envoi effectué.', 'conflict');
         }
         check();

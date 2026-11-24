@@ -17,12 +17,12 @@ import {
 } from '../lib/upload-preferences';
 import { getSupabaseClientState, subscribeSupabaseClient } from '../lib/supabase-config';
 import { userError } from '../lib/errors';
-import { inferUploadMimeType, normalizeUploadFile, prepareMobileUploadFile, UPLOAD_FILE_ACCEPT, UPLOAD_IMAGE_ACCEPT } from '../lib/upload-files';
+import { inferUploadMimeType, normalizeUploadFile, normalizeUploadFileName, prepareMobileUploadFile, UPLOAD_FILE_ACCEPT, UPLOAD_IMAGE_ACCEPT } from '../lib/upload-files';
 import {
   createUploadDraftPersistence, reconcileUploadDraftBatch, UploadDraftConflictError,
   type UploadDraftInput, type UploadPickerKind, type UploadPickerMarker,
 } from '../lib/upload-draft';
-import { logUploadDiagnostic } from '../lib/upload-diagnostics';
+import { logUploadDiagnostic, UPLOAD_PAGE_LOAD_ID, wasUploadPickerReloaded } from '../lib/upload-diagnostics';
 import { loadOptionalDocumentPreview } from '../lib/preview-loader';
 import { useAuth } from '../context/AuthContext';
 import { useDialogAccessibility } from '../hooks/useDialogAccessibility';
@@ -128,7 +128,9 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
   }, [publishBatch]);
   useEffect(() => {
     mountedRef.current = true;
+    logUploadDiagnostic('upload-mounted');
     return () => {
+      logUploadDiagnostic('upload-unmounted');
       mountedRef.current = false;
       pickerCancelCleanupRef.current?.();
       for (const controller of previewTasksRef.current.values()) controller.abort();
@@ -251,7 +253,10 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
         };
         applyStoredDraft(snapshot);
         setPreference(last);
-        setPickerReloaded(!!snapshot.picker);
+        setPickerReloaded(wasUploadPickerReloaded(snapshot.picker));
+        if (snapshot.picker) logUploadDiagnostic('selector-restored', {
+          picker: snapshot.picker.kind, previousPageLoadId: snapshot.picker.pageLoadId,
+        });
         setRestoredDraft(!!restoredBatch || !!formDraft && formDraft.files.length > 0);
         setDraftStatus(formDraft ? 'saved' : 'saving');
         draftScopeKeyRef.current = opening;
@@ -378,6 +383,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
     setPickerReady(null);
     setPickerReloaded(false);
     let returnTimer: ReturnType<typeof setTimeout> | undefined;
+    let returnLogged = false;
     const cancel = () => {
       if (pickerActiveRef.current !== marker || busyRef.current) return;
       resetPicker();
@@ -385,6 +391,11 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
     // Les anciens mobiles ne déclenchent pas tous « cancel ». Laisser le
     // changement natif arriver avant de traiter un retour sans sélection.
     const returned = () => {
+      if (!returnLogged && document.visibilityState === 'visible') {
+        returnLogged = true;
+        logUploadDiagnostic('selector-returned', { picker: marker.kind, previousPageLoadId: marker.pageLoadId });
+        setPickerReloaded(wasUploadPickerReloaded(marker));
+      }
       clearTimeout(returnTimer);
       returnTimer = setTimeout(() => {
         if (document.visibilityState === 'visible' && !input.files?.length) cancel();
@@ -421,7 +432,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
     const userId = currentUserIdRef.current;
     const isCurrent = () => mountedRef.current && draftRef.current === persistence
       && currentUserIdRef.current === userId && getSupabaseClientState().generation === origin.generation;
-    const marker: UploadPickerMarker = { kind, openedAt: Date.now() };
+    const marker: UploadPickerMarker = { kind, openedAt: Date.now(), pageLoadId: UPLOAD_PAGE_LOAD_ID };
     const snapshot = { ...draftSnapshotRef.current, picker: marker };
     pickerSavingRef.current = true;
     pickerReadyRef.current = null;
@@ -458,6 +469,8 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
 
   useEffect(() => {
     const visibleFiles = new Set(isOpen && scopeMatches && !batch ? files : []);
+    // Ne pas décoder un PDF ou une image pendant que le sélecteur natif est ouvert.
+    const previewPaused = isBusy || isSavingPicker || picker !== null;
     let changed = false;
     for (const [file, url] of localPreviewUrlsRef.current) {
       if (visibleFiles.has(file)) continue;
@@ -466,7 +479,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
       changed = true;
     }
     for (const [file, controller] of previewTasksRef.current) {
-      if (visibleFiles.has(file) && !isBusy && !isSavingPicker) continue;
+      if (visibleFiles.has(file) && !previewPaused) continue;
       controller.abort();
       previewTasksRef.current.delete(file);
       previewAttemptsRef.current.delete(file);
@@ -478,7 +491,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
       if (!files.includes(file)) durableFilesRef.current.delete(file);
     }
     if (changed) setLocalPreviews(new Map(localPreviewUrlsRef.current));
-    if (isBusy || isSavingPicker || draftStatus !== 'saved' || pendingDraftRef.current) return;
+    if (previewPaused || draftStatus !== 'saved' || pendingDraftRef.current) return;
     for (const file of visibleFiles) {
       if (!durableFilesRef.current.has(file) || previewAttemptsRef.current.has(file)) continue;
       const mime = inferUploadMimeType(file.name, file.type);
@@ -503,7 +516,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
         if (previewTasksRef.current.get(file) === controller) previewTasksRef.current.delete(file);
       });
     }
-  }, [files, isOpen, scopeMatches, batch, isBusy, isSavingPicker, draftStatus]);
+  }, [files, isOpen, scopeMatches, batch, isBusy, isSavingPicker, picker, draftStatus]);
 
   const handleFilesChosen = async (incoming: FileList | File[]) => {
     if (busyRef.current || pickerSavingRef.current || pendingDraftRef.current || draftRetryRef.current || !journalReady || !scopeMatches || uploadSuccess) return;
@@ -698,13 +711,17 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
       if (mountedRef.current) { setIsBusy(false); setPreparationLabel(null); }
     }
   };
-  const chooseInput = (event: ChangeEvent<HTMLInputElement>) => {
-    // Copier FileList avant de vider l'input : certains navigateurs invalident
-    // la liste native aussitôt après, notamment après la caméra.
-    const selected = Array.from(event.currentTarget.files || []);
-    event.currentTarget.value = '';
-    if (selected.length) void handleFilesChosen(selected);
-    else resetPicker();
+  const chooseInput = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    // Copier FileList avant le premier await ; garder une référence à l'input
+    // puisque currentTarget n'est plus utilisable après le callback React.
+    const selected = Array.from(input.files || []);
+    try {
+      if (selected.length) await handleFilesChosen(selected);
+      else resetPicker();
+    } finally {
+      input.value = '';
+    }
   };
   const pickerLocked = isBusy || isRetryingDraft || isSavingPicker || !!pendingDraftRef.current || !journalReady || !scopeMatches || uploadSuccess
     || draftStatus !== 'saved' || (!!batch && !canRetryUploadBatch(batch));
@@ -819,7 +836,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                   )}
                 </div>
 
-                {!batch && files.length > 0 && (
+                {!batch && scopeMatches && files.length > 0 && (
                   <fieldset disabled={fieldsLocked} className="min-w-0 space-y-3">
                     <legend className="sr-only">Titres des fichiers</legend>
                     {files.map((file, index) => (
@@ -827,14 +844,14 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                         <label htmlFor={`upload-file-title-${index}`} className="mb-1.5 block text-sm font-semibold">{files.length === 1 ? 'Titre' : `Titre du fichier ${index + 1}`}</label>
                         <input id={`upload-file-title-${index}`} type="text" required value={titles[index] || ''}
                           onChange={(event) => setTitles((current) => current.map((title, position) => position === index ? event.target.value : title))} className={fieldClass} />
-                        <p className="mt-1 flex min-w-0 items-start gap-1 text-xs text-[#141414]/60"><FileText aria-hidden="true" size={14} className="mt-0.5 shrink-0" /><span className="min-w-0 break-all">{file.name} · {formatFileSize(file.size)}</span></p>
-                        {localPreviews.get(file) && <img src={localPreviews.get(file)} alt={`Aperçu de ${file.name}`}
+                        <p className="mt-1 flex min-w-0 items-start gap-1 text-xs text-[#141414]/60"><FileText aria-hidden="true" size={14} className="mt-0.5 shrink-0" /><span className="min-w-0 break-all">{normalizeUploadFileName(file.name)} · {formatFileSize(file.size)}</span></p>
+                        {localPreviews.get(file) && <img src={localPreviews.get(file)} alt={`Aperçu de ${normalizeUploadFileName(file.name)}`}
                           className="mt-2 h-24 w-20 rounded-xl bg-white object-contain" />}
                       </div>
                     ))}
                   </fieldset>
                 )}
-                {(!batch || legacyLabelsNeeded) && (
+                {scopeMatches && (!batch || legacyLabelsNeeded) && (
                   <fieldset disabled={isBusy || isRetryingDraft || isSavingPicker || !!pendingDraftRef.current || !journalReady || !scopeMatches} className="min-w-0 space-y-3">
                     <legend className="sr-only">École et matière</legend>
                     {legacyLabelsNeeded && <p className="rounded-2xl bg-[#ffd23f]/20 p-3 text-sm">Vous pouvez vérifier les fichiers déjà reçus. Pour terminer les autres, choisissez leur école et leur matière.</p>}
@@ -866,7 +883,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                     </label>}
                   </fieldset>
                 )}
-                {!batch && (
+                {scopeMatches && !batch && (
                   <details className="min-w-0 rounded-2xl border border-[#141414]/15 bg-white/60">
                     <summary className="flex min-h-11 cursor-pointer items-center px-3 py-2 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-[#ff6a2b]">Ajouter une description (facultatif)</summary>
                     <div className="space-y-1.5 px-3 pb-3">
@@ -878,7 +895,7 @@ export function UploadModal({ isOpen, onClose, documents, onSuccess }: UploadMod
                   </details>
                 )}
                 {preparationLabel && <p role="status" className="text-sm text-[#141414]/75">{preparationLabel}</p>}
-                {batch && (
+                {scopeMatches && batch && (
                   <section aria-labelledby="upload-report-title" className="space-y-3">
                     <h3 id="upload-report-title" className="text-sm font-bold">Bilan du dépôt</h3>
                     <p role="status" aria-live="polite" className={`rounded-2xl p-3 text-sm ${uploadSuccess ? 'bg-emerald-50 font-semibold text-emerald-800' : 'bg-white/60 text-[#141414]/80'}`}>

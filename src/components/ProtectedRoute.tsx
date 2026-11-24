@@ -6,7 +6,7 @@ import { useAuth } from '../context/AuthContext';
 
 export const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const {
-    user, loading, sessionError, roleError, isConfigured,
+    user, userRole, loading, sessionError, roleError, isConfigured,
     retrySession, refreshUserRole, setIsConfigModalOpen,
   } = useAuth();
   const reducedMotion = useReducedMotion();
@@ -34,7 +34,9 @@ export const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ childr
     );
   }
 
-  if (loading) {
+  // Le premier chargement peut bloquer la route ; une revalidation ne retire
+  // jamais les enfants d'un compte déjà résolu.
+  if (loading && (!user || userRole === null)) {
     return (
       <div role="status" className="min-h-dvh bg-[#f1ece4] flex flex-col items-center justify-center p-6">
         <motion.div

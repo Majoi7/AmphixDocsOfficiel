@@ -4,7 +4,7 @@ import { createMemoryRouter, RouterProvider, useNavigate } from 'react-router-do
 import { UploadModal } from '../../src/components/UploadModal';
 import { readUploadDraft, saveUploadDraft, type UploadDraftInput, type UploadDraftScope } from '../../src/lib/upload-draft';
 import { readUploadJournal, serializeUploadBatch, type UploadBatchReport } from '../../src/lib/upload-batch';
-import { startUploadDiagnostics, UPLOAD_DIAGNOSTICS_KEY } from '../../src/lib/upload-diagnostics';
+import { startUploadDiagnostics, UPLOAD_DIAGNOSTICS_KEY, UPLOAD_PAGE_LOAD_ID } from '../../src/lib/upload-diagnostics';
 import {
   failFixtureTransfer, fixtureNetworkAttempts, fixtureUser, getSupabaseClientState,
   holdFixtureTransfer, releaseFixtureTransfer, setFixtureProject, setFixtureUser, transportCalls,
@@ -21,7 +21,7 @@ let failPut = false;
 let failDelete = false;
 let delayOpen = false;
 let releaseOpen: (() => void) | null = null;
-let controls: { open: () => void; close: () => void; navigateAway: () => void } | null = null;
+let controls: { open: () => void; close: () => void; rerender: () => void; remount: () => void; navigateAway: () => void } | null = null;
 const observedTransactions = new WeakSet<IDBTransaction>();
 const nativeOpen = IDBFactory.prototype.open;
 const nativePut = IDBObjectStore.prototype.put;
@@ -100,9 +100,13 @@ function chooseFiles(specifications: FixtureFile[], picker = 'files') {
 }
 function Harness() {
   const [isOpen, setIsOpen] = useState(false);
+  const [mountRevision, setMountRevision] = useState(0);
+  const [, rerender] = useState(0);
   const navigate = useNavigate();
   useEffect(() => {
-    controls = { open: () => setIsOpen(true), close: () => setIsOpen(false), navigateAway: () => navigate('/away') };
+    controls = { open: () => setIsOpen(true), close: () => setIsOpen(false),
+      rerender: () => rerender((revision) => revision + 1), remount: () => setMountRevision((revision) => revision + 1),
+      navigateAway: () => navigate('/away') };
     return () => { controls = null; };
   }, [navigate]);
   return (
@@ -111,7 +115,8 @@ function Harness() {
       <p className="my-2 text-sm">Compte et transfert fictifs · aucune connexion à Supabase.</p>
       <button id="open-upload-test" type="button" className="min-h-11 rounded-full bg-[#ff6a2b] px-4"
         onClick={() => setIsOpen(true)}>Ouvrir le dépôt de test</button>
-      <UploadModal isOpen={isOpen} onClose={() => setIsOpen(false)} documents={[]} onSuccess={(report) => {
+      {/* Remontage volontaire propre au banc, jamais une clé Auth en production. */}
+      <UploadModal key={mountRevision} isOpen={isOpen} onClose={() => setIsOpen(false)} documents={[]} onSuccess={(report) => {
         reports.push(report);
         if (rejectReports) throw new Error('Actualisation fictivement indisponible.');
       }} />
@@ -126,6 +131,8 @@ const api = {
   ready: () => !!controls,
   open: () => controls?.open(),
   close: () => controls?.close(),
+  rerender: () => controls?.rerender(),
+  remount: () => controls?.remount(),
   navigateAway: () => controls?.navigateAway(),
   setUser: setFixtureUser,
   setProject: setFixtureProject,
@@ -140,6 +147,7 @@ const api = {
   releaseOpen: () => releaseOpen?.(),
   hasHeldOpen: () => !!releaseOpen,
   metrics: () => ({ ...metrics }),
+  pageLoadId: () => UPLOAD_PAGE_LOAD_ID,
   diagnostics: () => JSON.parse(sessionStorage.getItem(UPLOAD_DIAGNOSTICS_KEY) || '[]') as unknown[],
   networkAttempts: fixtureNetworkAttempts,
   violations: () => [...violations],

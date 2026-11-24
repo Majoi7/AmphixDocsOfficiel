@@ -86,7 +86,8 @@ export function useAuth() {
     authListeners.add(listener);
     return () => { authListeners.delete(listener); };
   }, () => user, () => user);
-  return { user: current, isAdmin: false, signOut: async () => { setFixtureUser(null); } };
+  return { user: current, userRole: current ? 'user' as const : null,
+    isAdmin: false, isConfigured: true, sessionError: null, roleError: null, signOut: async () => { setFixtureUser(null); } };
 }
 
 const documents = new Map<string, DocumentItem>();
@@ -102,19 +103,24 @@ for (let n = 1; n <= 50; n++) documents.set(fixtureId(n), {
 const visible = (document: DocumentItem, actor = user?.id) => document.deleted_at === null
   && (document.status === 'approved' || document.user_id === actor);
 const clone = <T,>(value: T): T => structuredClone(value);
-export const libraryCalls: { ids: string[]; offset: number }[] = [];
+export const libraryCalls: { ids: string[]; offset: number; query: string; at: number }[] = [];
 export const targetCalls: string[][] = [];
 export const thumbnailCalls: string[][] = [];
 export const mutationCalls: { action: string; id: string; confirmed: boolean }[] = [];
 let previewFailure = false;
+let libraryFailure = false;
 export async function fetchDashboardData(actorId: string, _admin?: boolean, _client?: unknown, options: LibraryPageOptions = {}) {
   if (actorId !== user?.id) throw new Error('Compte fictif changé.');
   const offset = options.offset ?? 0;
+  const term = (options.query || '').toLocaleLowerCase('fr');
   const candidates = [...documents.values()].filter((document) => Number(document.id.slice(0, 8)) <= 20
     && (document.deleted_at !== null) === !!options.trash
-    && (!options.query || document.title.toLocaleLowerCase('fr').includes(options.query.toLocaleLowerCase('fr'))));
+    && (!term || [document.title, document.description, document.file_name, document.school_name, document.subject_name]
+      .some((value) => value?.toLocaleLowerCase('fr').includes(term))));
   const page = candidates.slice(offset, offset + 20);
-  libraryCalls.push({ ids: page.map((document) => document.id), offset });
+  libraryCalls.push({ ids: page.map((document) => document.id), offset, query: options.query || '', at: performance.now() });
+  await gates.get('library')?.promise;
+  if (libraryFailure) throw new Error('LIBRARY_SQL_SECRET_SHOULD_NEVER_RENDER');
   return { documents: clone(page) };
 }
 export async function fetchDocumentTargets(ids: readonly string[], actorId: string) {
@@ -325,6 +331,7 @@ export const fixtureApi = {
   fail: (action: Action, status = 503) => { nextFailure = { action, status }; },
   failMutation: (action: string) => { mutationFailure = action; },
   failPreview: (fail: boolean) => { previewFailure = fail; },
+  failLibrary: (fail: boolean) => { libraryFailure = fail; },
   user: setFixtureUser, scope: changeFixtureScope, refreshToken: refreshFixtureToken,
   probeCsp: () => nativeFetch(`${TEST_PROJECT}/rest/v1/documents`).then(() => 'autorisé', () => 'refusé'),
   viewport: (height: number, offsetTop = 0) => {

@@ -27,6 +27,26 @@ export const UPLOAD_FILE_ACCEPT = [
 ].join(',');
 export const UPLOAD_IMAGE_ACCEPT = 'image/*,.heic,.heif';
 
+// Libellé uniquement : le nom d'origine ne fait plus partie du chemin Storage.
+export function normalizeUploadFileName(name: string): string {
+  const safe = name.normalize('NFD').replace(/\p{M}/gu, '').replace(/[^A-Za-z0-9._-]/g, '_') || 'document';
+  if (safe.length <= 100) return safe;
+  const dot = safe.lastIndexOf('.');
+  const extension = dot > 0 ? safe.slice(dot) : '';
+  if (extension.length >= 100) throw new Error('L’extension du fichier est trop longue. Renommez le fichier puis réessayez.');
+  return `${safe.slice(0, 100 - extension.length)}${extension}`;
+}
+export const uploadStoragePath = (userId: string, id: string) => `${userId}/${id}-document`;
+export function isUploadIdentityPath(fileName: string, userId: string, id: string, path: string): boolean {
+  // Le suffixe fixe garde le contrat SQL V5 « UUID-% ». Les traces existantes
+  // restent vérifiables sous leur chemin exact : aucune migration d'objet.
+  return path === uploadStoragePath(userId, id)
+    || path === `${userId}/${id}-${fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
+}
+export function matchesUploadFileName(label: string, originalName: string): boolean {
+  return label === originalName || label === normalizeUploadFileName(originalName);
+}
+
 export function inferUploadMimeType(fileName: string, mimeType = ''): string {
   const provided = mimeType.trim().toLowerCase().split(';')[0];
   const extension = fileName.split('.').pop()?.toLowerCase() || '';
@@ -45,6 +65,7 @@ export function isSupportedUploadFile(file: Pick<File, 'name' | 'type'>): boolea
 export function normalizeUploadFile(file: File): File {
   if (!file.name || !isSupportedUploadFile(file)) throw new Error('Choisissez un PDF, une image, un document Word, PowerPoint ou texte.');
   if (file.size > MAX_UPLOAD_FILE_SIZE) throw new Error('Chaque fichier est limité à 20 Mo. Choisissez un fichier plus léger.');
+  normalizeUploadFileName(file.name);
   const type = inferUploadMimeType(file.name, file.type);
   return type === file.type ? file : new File([file], file.name, { type, lastModified: file.lastModified });
 }

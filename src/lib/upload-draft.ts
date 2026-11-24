@@ -2,7 +2,7 @@ import {
   attachUploadFiles, isUploadBatchComplete, preservesUploadBatch, restoreUploadBatch, serializeUploadBatch,
   type UploadBatch,
 } from './upload-batch';
-import { MAX_UPLOAD_FILE_SIZE } from './upload-files';
+import { MAX_UPLOAD_FILE_SIZE, matchesUploadFileName } from './upload-files';
 
 export interface UploadDraftScope {
   userId: string;
@@ -12,6 +12,8 @@ export type UploadPickerKind = 'files' | 'gallery' | 'camera';
 export interface UploadPickerMarker {
   kind: UploadPickerKind;
   openedAt: number;
+  // Facultatif pour relire les brouillons antérieurs, sans faux rechargement.
+  pageLoadId?: string;
 }
 export interface UploadDraftInput {
   files: File[];
@@ -96,7 +98,12 @@ function pickerMarker(value: unknown): UploadPickerMarker | null {
     || typeof value.openedAt !== 'number' || !Number.isFinite(value.openedAt) || value.openedAt <= 0) {
     throw new Error('Le choix de fichier conservé ne peut pas être lu.');
   }
-  return { kind: value.kind as UploadPickerKind, openedAt: value.openedAt };
+  if (value.pageLoadId !== undefined && (typeof value.pageLoadId !== 'string'
+    || !/^[A-Za-z0-9_-]{1,80}$/.test(value.pageLoadId))) {
+    throw new Error('Le chargement du sélecteur conservé ne peut pas être lu.');
+  }
+  return { kind: value.kind as UploadPickerKind, openedAt: value.openedAt,
+    ...(typeof value.pageLoadId === 'string' ? { pageLoadId: value.pageLoadId } : {}) };
 }
 
 function preparationFlags(value: unknown, count: number): boolean[] {
@@ -155,7 +162,7 @@ export function decodeUploadDraft(scope: UploadDraftScope, value: unknown): Uplo
     }
     const entry = batch?.entries.find((item) => item.request.identity.id === attachment.id);
     const file = restoreFile(attachment.file);
-    if (!entry || entry.request.fileName !== file.name || entry.request.fileSize !== file.size) {
+    if (!entry || !matchesUploadFileName(entry.request.fileName, file.name) || entry.request.fileSize !== file.size) {
       throw new UploadDraftConflictError();
     }
     attachments.set(attachment.id, file);

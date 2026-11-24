@@ -69,7 +69,7 @@ export async function resumeUserDocument() { throw new Error('Le dépôt est hor
         'src/pages/DashboardPage.tsx', 'src/hooks/useLeoSession.ts', 'src/lib/leo-client.ts', 'src/lib/leo-session.ts',
         'src/hooks/useLibraryNavigation.ts', 'src/hooks/useDialogAccessibility.ts', 'src/hooks/useDialogViewport.ts',
         'src/hooks/useDocumentThumbnails.ts', 'src/hooks/useDocumentLink.ts', 'src/components/LeoPanel.tsx',
-        'src/components/LeoLauncher.tsx', 'src/components/DocumentGrid.tsx', 'src/components/FileCard.tsx',
+        'src/components/LeoLauncher.tsx', 'src/components/SearchBar.tsx', 'src/components/DocumentGrid.tsx', 'src/components/FileCard.tsx',
         'src/components/DocumentDetails.tsx', 'src/components/DocumentPreview.tsx',
         'src/components/DocumentFileViewer.tsx', 'src/components/PdfDocumentViewer.tsx', 'src/components/ImageDocumentViewer.tsx',
         'src/components/ui/ai-input-with-loading.tsx', 'src/components/ui/chain-of-thought.tsx',
@@ -382,6 +382,107 @@ test('CDP et CSP bloquent le réseau avant tout appel réel', async () => {
   await fresh();
   assert.equal(await api('probeCsp'), 'refusé');
   await waitFor('window.__leoCsp.includes("connect-src")', 'preuve du blocage CSP du fetch natif');
+});
+
+test('R1 : une recherche montée par écran, q partagé et formes de main conservées', async () => {
+  for (const width of [320, 360, 390, 430, 768, 1366]) {
+    await fresh(width, '/dashboard?q=fictif');
+    assert.equal(await evaluate('document.querySelectorAll(\'input[type="search"]\').length'), 1);
+    assert.equal(await evaluate('document.querySelectorAll(\'button[aria-label="Ouvrir Léo AI"]\').length'), 1);
+    const variant = await evaluate('document.querySelector(\'form[role="search"]\').dataset.searchVariant');
+    assert.equal(variant, width < 768 ? 'mobile' : 'hero');
+    await api('navigate', '/dashboard?view=search&q=fictif');
+    await waitFor('!!document.querySelector(\'form[data-search-variant="list"]\')', 'recherche commune');
+    assert.equal(await evaluate('document.querySelectorAll(\'input[type="search"]\').length'), 1);
+    assert.equal(await evaluate('document.querySelector(\'input[type="search"]\').value'), 'fictif');
+    await fill('input[type="search"]', 'algèbre');
+    await waitFor('new URLSearchParams(location.search).get("q") === "algèbre"', 'q dans l’adresse');
+    const style = await evaluate(`(() => {
+      const input = document.querySelector('input[type="search"]'), css = getComputedStyle(input);
+      const clear = document.querySelector('button[aria-label="Effacer la recherche"]').getBoundingClientRect();
+      return { border: css.borderColor, background: css.backgroundColor, shadow: css.boxShadow,
+        outline: css.outlineColor, font: css.fontSize, clearWidth: clear.width, clearHeight: clear.height,
+        page: document.documentElement.scrollWidth };
+    })()`);
+    assert.equal(style.border, 'rgb(20, 20, 20)'); assert.equal(style.background, 'rgb(255, 255, 255)');
+    assert.equal(style.shadow, 'none'); assert.equal(style.outline, 'rgb(20, 20, 20)');
+    assert.equal(style.font, '16px'); assert.ok(style.clearWidth >= 44 && style.clearHeight >= 44);
+    assert.ok(style.page <= width);
+    await evaluate('window.__r1StableSearchPage = true');
+    await key('Enter'); await api('settle');
+    assert.equal(await evaluate('window.__r1StableSearchPage'), true);
+    if (width < 768) {
+      assert.equal(await evaluate('document.activeElement === document.querySelector(\'input[type="search"]\')'), false);
+      await click('button[data-nav="explore"]');
+    } else await clickText('Explorer', 'header');
+    await waitFor('new URLSearchParams(location.search).get("view") === "explore"', 'Explorer');
+    assert.equal(await evaluate('document.querySelector(\'input[type="search"]\').value'), 'algèbre');
+    await api('navigate', '/dashboard?q=alg%C3%A8bre');
+    await waitFor('!!document.querySelector(\'form[data-search-variant="mobile"], form[data-search-variant="hero"]\')', 'retour accueil');
+    assert.equal(await evaluate('document.querySelector(\'input[type="search"]\').value'), 'algèbre');
+  }
+});
+
+test('R1 : passage mobile/desktop sans recherche dupliquée ni valeur perdue', async () => {
+  await fresh(320, '/dashboard?q=fictif');
+  for (const width of [1366, 430, 768, 320]) {
+    await send('Emulation.setDeviceMetricsOverride', { width, height: 800, screenWidth: width, screenHeight: 800, deviceScaleFactor: 1, mobile: width < 768 });
+    const expected = width < 768 ? 'mobile' : 'hero';
+    await waitFor(`document.querySelector('form[role="search"]')?.dataset.searchVariant === ${JSON.stringify(expected)}`, 'variante au breakpoint');
+    assert.equal(await evaluate('document.querySelectorAll(\'input[type="search"]\').length'), 1);
+    assert.equal(await evaluate('document.querySelector(\'input[type="search"]\').value'), 'fictif');
+    assert.equal(await evaluate('document.querySelectorAll("main h1").length'), 1);
+    assert.ok(await evaluate('document.documentElement.scrollWidth <= innerWidth'));
+  }
+});
+
+test('R1 : focus depuis l’accueil, saisie et effacement ne perdent pas la recherche', async () => {
+  await fresh(320);
+  await click('input[type="search"]');
+  await waitFor('new URLSearchParams(location.search).get("view") === "search"', 'ouverture Recherche');
+  await waitFor('document.activeElement === document.querySelector(\'input[type="search"]\')', 'focus restauré après ouverture');
+  await fill('input[type="search"]', 'fictif');
+  await waitFor('window.__leoTest.libraryCalls().at(-1)?.query === "fictif"', 'recherche réelle dans le banc');
+  await click('button[aria-label="Effacer la recherche"]');
+  await waitFor('!new URLSearchParams(location.search).has("q")', 'effacement de q');
+  assert.equal(await evaluate('document.activeElement === document.querySelector(\'input[type="search"]\')'), true);
+  assert.equal(await evaluate('document.querySelector(\'input[type="search"]\').value'), '');
+});
+
+test('R1 : debounce réseau de 250 ms, pas d’état vide pendant la saisie', async () => {
+  await fresh(320, '/dashboard?view=search');
+  await api('hold', 'library');
+  const before = (await api('libraryCalls')).length;
+  await evaluate(`document.querySelector('input[type="search"]').addEventListener('input', () => {
+    window.__r1LastInputAt = performance.now();
+  }, { once: true });`);
+  await fill('input[type="search"]', 'inconnu-r1');
+  const lastInput = await evaluate('window.__r1LastInputAt');
+  await waitFor('window.__leoTest.libraryCalls().some(call => call.query === "inconnu-r1")', 'requête après debounce');
+  const calls = (await api('libraryCalls')).slice(before).filter(call => call.query === 'inconnu-r1');
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].at - lastInput >= 180, 'La lecture ne doit pas suivre chaque caractère.');
+  assert.equal(await evaluate('document.querySelector(\'section[aria-label="Résultats"]\').getAttribute("aria-busy")'), 'true');
+  assert.equal(await evaluate('document.querySelector(\'section[aria-label="Résultats"] h3\')'), null);
+  await api('release', 'library');
+  await waitFor('document.querySelector(\'section[aria-label="Résultats"] h3\')?.textContent === "Aucun fichier trouvé"', 'état vide confirmé');
+});
+
+test('R1 : erreur actionnable, liste conservée et réessai sans recharger la page', async () => {
+  await fresh(320, '/dashboard?view=explore');
+  await waitFor('document.querySelectorAll(\'main button[aria-haspopup="dialog"]\').length > 0', 'fichiers initiaux');
+  const before = await evaluate('document.querySelectorAll(\'main button[aria-haspopup="dialog"]\').length');
+  await api('failLibrary', true);
+  await clickText('Actualiser', 'main');
+  await waitFor('document.querySelector(\'main [role="alert"]\')?.textContent.includes("Les fichiers n’ont pas pu être chargés")', 'erreur française');
+  assert.equal(await evaluate('document.querySelectorAll(\'main button[aria-haspopup="dialog"]\').length'), before);
+  assert.equal(await evaluate('document.querySelector("main").textContent.includes("LIBRARY_SQL_SECRET")'), false);
+  await evaluate('window.__r1StablePage = true');
+  await api('failLibrary', false);
+  await clickText('Réessayer le chargement', 'main');
+  await waitFor('!document.querySelector(\'main [role="alert"]\')', 'erreur résolue');
+  assert.equal(await evaluate('window.__r1StablePage'), true);
+  assert.equal(await evaluate('document.querySelectorAll(\'input[type="search"]\').length'), 1);
 });
 
 test('launchers accueil/recherche, cibles tactiles et panneau de 320 px au desktop', async () => {
