@@ -42,7 +42,7 @@ const session = {
   token_type: 'bearer', expires_in: 3600, expires_at: expiresAt, user,
 };
 const originalFetch = globalThis.fetch;
-const originalGlobals = new Map(['window', 'document', 'localStorage'].map((name) =>
+const originalGlobals = new Map(['window', 'document', 'localStorage', 'XMLHttpRequest'].map((name) =>
   [name, Object.getOwnPropertyDescriptor(globalThis, name)]
 ));
 const storageValues = new Map();
@@ -81,7 +81,6 @@ let library;
 let requests;
 let violations;
 let profileVisible;
-let verifiedUser;
 let tables;
 let objects;
 let mutationResponses;
@@ -103,11 +102,67 @@ const requestsFor = (method, path) => requests.filter((request) =>
   request.method === method && request.url.pathname === path
 );
 
+function setFixtureAccount(id) {
+  storageValues.set(sessionKey, JSON.stringify({ ...session, user: { ...user, id },
+    access_token: [base64url({ alg: 'HS256', typ: 'JWT' }),
+      base64url({ sub: id, aud: 'authenticated', role: 'authenticated', exp: expiresAt }),
+      Buffer.from('signature-fictive-tests-locaux').toString('base64url')].join('.'),
+  }));
+}
+
+// Node ne fournit pas XMLHttpRequest. Cette frontière locale garde le transport
+// XHR de production, mais ses requêtes passent exclusivement par simulatedFetch.
+class FixtureXMLHttpRequest {
+  upload = { onprogress: null };
+  status = 0;
+  responseText = '';
+  onload = null;
+  onerror = null;
+  onabort = null;
+  ontimeout = null;
+  aborted = false;
+  headers = new Headers();
+  responseHeaders = new Headers();
+
+  open(method, url) {
+    this.method = method;
+    this.url = new URL(url);
+    if (this.url.origin !== origin) {
+      violations.push(`Domaine XHR interdit : ${this.url.origin}`);
+      throw new Error('Tout accès XHR externe est interdit dans ces tests.');
+    }
+  }
+  setRequestHeader(name, value) { this.headers.append(name, value); }
+  getResponseHeader(name) { return this.responseHeaders.get(name); }
+  abort() {
+    if (this.aborted) return;
+    this.aborted = true;
+    this.onabort?.();
+  }
+  send(body) {
+    void (async () => {
+      try {
+        const response = await globalThis.fetch(this.url.href, { method: this.method, headers: this.headers, body });
+        const text = await response.text();
+        if (this.aborted) return;
+        this.status = response.status;
+        this.responseHeaders = response.headers;
+        this.responseText = text;
+        this.upload.onprogress?.({ lengthComputable: true, loaded: body.size, total: body.size });
+        if (!this.aborted) this.onload?.();
+      } catch {
+        // Une réponse perdue peut suivre un objet déjà reçu dans objects.
+        // Le vrai protocole doit le relire, pas recevoir un succès fabriqué.
+        if (!this.aborted) this.onerror?.();
+      }
+    })();
+  }
+}
+
 function resetFixtures() {
   requests = [];
   violations = [];
   profileVisible = true;
-  verifiedUser = user;
   tables = {
     documents: new Map([[documentId, { ...document }]]),
   };
@@ -179,7 +234,8 @@ async function simulatedFetch(input, init = {}) {
   assert.equal(headers.get('apikey'), publicKey);
   assert.equal(headers.get('authorization'), `Bearer ${accessToken}`);
   if (url.pathname === '/auth/v1/user' && method === 'GET') {
-    return jsonResponse(verifiedUser);
+    violations.push('Revérification Auth inattendue dans le banc de dépôt.');
+    throw new Error('Le dépôt ne doit pas relancer getUser.');
   }
   if (url.pathname === '/rest/v1/rpc/list_library_documents' && method === 'POST') {
     return respondToLibrary(body, url);
@@ -218,10 +274,10 @@ async function simulatedFetch(input, init = {}) {
     }
     if (method === 'POST') {
       assert.equal(headers.get('x-upsert'), 'false', 'Un dépôt ne doit jamais remplacer un objet.');
-      assert.ok(init.body instanceof FormData);
-      assert.equal(init.body.get('cacheControl'), '0');
-      const file = [...init.body.values()].find((value) => value instanceof Blob);
-      assert.ok(file, 'Le transfert doit contenir de vrais octets de fixture.');
+      assert.ok(init.body instanceof Blob, 'XHR doit envoyer directement le File/Blob, sans conversion FormData/base64.');
+      assert.equal(headers.get('cache-control'), 'max-age=0');
+      assert.equal(headers.get('content-type'), 'application/pdf');
+      const file = init.body;
       if (objects.has(path)) return jsonResponse({ code: 'Duplicate', message: 'Objet déjà présent.' }, 409);
       const failure = failures.storageUpload;
       delete failures.storageUpload;
@@ -249,6 +305,7 @@ before(async () => {
   // L’onglet caché évite un rafraîchissement inutile du jeton fictif.
   Object.defineProperty(globalThis, 'document', { configurable: true, value: { visibilityState: 'hidden' } });
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
+  Object.defineProperty(globalThis, 'XMLHttpRequest', { configurable: true, value: FixtureXMLHttpRequest });
   globalThis.fetch = async (...args) => {
     try { return await simulatedFetch(...args); }
     catch (error) {
@@ -330,14 +387,14 @@ test('un échec de signature groupée reste une erreur et un compte incompatible
   failures.thumbnailSign = { status: 503, data: { message: 'Panne fictive du stockage', statusCode: '503' } };
   await assert.rejects(() => library.getDocumentThumbnailUrls(['test.jpg'], userId));
   resetFixtures();
-  verifiedUser = { ...user, id: '22222222-2222-4222-8222-222222222222' };
-  await assert.rejects(() => library.getDocumentThumbnailUrls(['test.jpg'], userId), library.UploadScopeError);
+  setFixtureAccount('22222222-2222-4222-8222-222222222222');
+  await assert.rejects(() => library.getDocumentThumbnailUrls(['test.jpg'], userId), /session du compte d’origine/);
   assert.equal(requestsFor('POST', '/storage/v1/object/sign/document-thumbnails').length, 0);
 });
 
 test('une signature répondue après déconnexion ne quitte pas son ancien scope', async () => {
   failures.afterThumbnailSign = () => { storageValues.delete(sessionKey); };
-  await assert.rejects(() => library.getDocumentThumbnailUrls(['test.jpg'], userId), library.UploadScopeError);
+  await assert.rejects(() => library.getDocumentThumbnailUrls(['test.jpg'], userId), /session a changé avant la confirmation/);
   assert.equal(requestsFor('POST', '/storage/v1/object/sign/document-thumbnails').length, 1);
 });
 
@@ -392,7 +449,7 @@ test('le retour du dépôt joint profiles via la FK documents et publie des éta
   assert.equal(result.author_name, author.full_name);
   assert.equal(result.file_size, 4);
   assert.deepEqual(stages, ['verification', 'transfert', 'enregistrement', 'termine']);
-  assert.ok(requestsFor('GET', '/auth/v1/user').length > 0);
+  assert.equal(requestsFor('GET', '/auth/v1/user').length, 0, 'Les droits sont vérifiés par les API, sans revérification Auth supplémentaire.');
 });
 
 test('la modération laisse reviewer/date au serveur et confirme la cible', async () => {
@@ -547,15 +604,15 @@ test('resélectionner un fichier de même nom et taille mais de contenu différe
 // Création/reprise de dossier retirées avec le contrat V5, sans contourner
 // les tests de reprise des fichiers ni l'interdiction de réseau réel.
 
-test('un compte Auth incompatible bloque les écritures et conserve l’identité du dépôt', async () => {
+test('un compte changé bloque les écritures sans appel getUser supplémentaire', async () => {
   const request = await prepareRequest();
-  verifiedUser = { ...user, id: '77777777-7777-4777-8777-777777777777' };
+  setFixtureAccount('77777777-7777-4777-8777-777777777777');
+  requests = [];
   await assert.rejects(library.resumeUserDocument(request, testFile(), undefined, origin, 'initial'), (error) => {
     assert.equal(error.kind, 'scope');
     assert.deepEqual(error.identity, request.identity);
     return true;
   });
-  assert.ok(requests.length > 0);
-  assert.ok(requests.every(({ url }) => url.pathname === '/auth/v1/user'));
+  assert.equal(requests.length, 0);
   assertNoCleanup();
 });

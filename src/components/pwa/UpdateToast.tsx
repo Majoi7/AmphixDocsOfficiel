@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'motion/react';
-import { RefreshCw } from 'lucide-react';
-import { MODULE_LOAD_ERROR_EVENT, manuallyRefreshApp } from '../../lib/module-load-error';
+import { X } from 'lucide-react';
+import { MODULE_LOAD_ERROR_EVENT, dismissModuleLoadNotice } from '../../lib/module-load-error';
 
 // Le SW est retiré : cette notice concerne uniquement un module indisponible.
 // Aucun effet, événement de visibilité ou changement de contrôleur ne recharge.
@@ -31,9 +31,9 @@ export const UpdateToast: React.FC = () => {
         <p className="font-bold">Une partie de l’application n’a pas pu être chargée.</p>
         <p className="mt-1 text-white/80">Le brouillon déjà enregistré reste sur cet appareil.</p>
       </div>
-      <button type="button" onClick={manuallyRefreshApp}
+      <button type="button" onClick={() => { dismissModuleLoadNotice(); setFailed(false); }}
         className="flex min-h-11 shrink-0 cursor-pointer items-center gap-1.5 rounded-full bg-white px-4 text-xs font-extrabold text-[#4a6cf0] focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white">
-        <RefreshCw size={16} aria-hidden="true" />Actualiser
+        <X size={16} aria-hidden="true" />Fermer
       </button>
     </motion.aside>}
   </AnimatePresence>;

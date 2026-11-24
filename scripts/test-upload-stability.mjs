@@ -52,7 +52,7 @@ function fixture(t, overrides = {}) {
   const client = { auth: {
     onAuthStateChange: (next) => { callback = next; return { data: { subscription: { unsubscribe() { callback = undefined; } } } }; },
     getSession: async () => { calls.session++; return overrides.getSession ? overrides.getSession() : { data: { session: makeSession() }, error: null }; },
-    getUser: async (token) => { calls.user++; return overrides.getUser ? overrides.getUser(token) : { data: { user: makeUser() }, error: null }; },
+    getUser: async () => { calls.user++; assert.fail('Aucun getUser supplémentaire ne doit retarder le dépôt.'); },
   } };
   const controller = auth.createAuthSessionController({
     client, generation: 1,
@@ -91,7 +91,7 @@ test('Auth : une réémission pendant la première résolution ne relance ni get
   assert.equal(f.controller.getSnapshot(), resolving);
   role.resolve('user');
   await until(() => f.controller.getSnapshot().roleStatus === 'ready');
-  assert.equal(f.calls.user, 1);
+  assert.equal(f.calls.user, 0);
   assert.equal(f.calls.role, 1);
 });
 
@@ -119,31 +119,32 @@ test('Auth : SIGNED_OUT efface le compte ; une notification sans session ne simu
   assert.equal(f.controller.getSnapshot().sessionStatus, 'ready');
 });
 
-test('Auth : une réponse du compte précédent ne gagne pas contre un vrai changement de compte', async (t) => {
-  const firstUser = deferred();
-  let request = 0;
-  const f = fixture(t, { getUser: () => ++request === 1 ? firstUser.promise : { data: { user: makeUser(secondUserId) }, error: null } });
-  await until(() => f.calls.user === 1);
+test('Auth : une réponse de profil précédente ne gagne pas contre un vrai changement de compte', async (t) => {
+  const firstRole = deferred();
+  const f = fixture(t, { loadRole: (id) => id === userId ? firstRole.promise : 'user' });
+  await until(() => f.calls.role === 1);
   f.emit('SIGNED_IN', makeSession(secondUserId));
   await until(() => f.controller.getSnapshot().roleStatus === 'ready');
   const second = f.controller.getSnapshot();
-  firstUser.resolve({ data: { user: makeUser() }, error: null });
+  firstRole.resolve('admin');
   await pause(5);
   assert.equal(f.controller.getSnapshot(), second);
   assert.equal(second.user.id, secondUserId);
-  assert.equal(f.calls.role, 1);
+  assert.equal(f.calls.role, 2);
+  assert.equal(f.calls.user, 0);
 });
 
 test('Auth : le réessai explicite après erreur reste possible pour le même compte', async (t) => {
   let request = 0;
-  const f = fixture(t, { getUser: () => ++request === 1
-    ? { data: { user: null }, error: new Error('Échec fictif') }
-    : { data: { user: makeUser() }, error: null } });
+  const f = fixture(t, { getSession: () => ++request === 1
+    ? { data: { session: null }, error: new Error('Échec fictif') }
+    : { data: { session: makeSession() }, error: null } });
   await until(() => f.controller.getSnapshot().sessionStatus === 'error');
   await f.controller.retrySession();
   await until(() => f.controller.getSnapshot().roleStatus === 'ready');
   assert.equal(f.controller.getSnapshot().user.id, userId);
-  assert.equal(f.calls.user, 2);
+  assert.equal(f.calls.session, 2);
+  assert.equal(f.calls.user, 0);
 });
 
 test('Auth : un réessai de session déjà résolue ne publie pas d’écran de chargement', async (t) => {
@@ -154,7 +155,7 @@ test('Auth : un réessai de session déjà résolue ne publie pas d’écran de 
   await f.controller.retrySession();
   assert.equal(f.controller.getSnapshot(), before);
   assert.equal(f.published.length, publications);
-  assert.equal(f.calls.user, 1);
+  assert.equal(f.calls.user, 0);
   assert.equal(f.calls.role, 1);
 });
 
@@ -170,6 +171,25 @@ test('Auth : une revalidation de rôle explicite garde les enfants jusqu’à la
   await refresh;
   assert.equal(f.controller.getSnapshot().user, before.user);
   assert.equal(f.controller.getSnapshot().userRole, 'user');
+});
+
+test('Auth : erreurs temporaires de session et de profil ne retirent pas une page ouverte', async (t) => {
+  let roleRequest = 0, sessionRequest = 0;
+  const f = fixture(t, {
+    getSession: () => ++sessionRequest === 1 ? { data: { session: makeSession() }, error: null }
+      : { data: { session: null }, error: new Error('Réseau fictivement interrompu') },
+    loadRole: () => { if (++roleRequest === 1) return 'admin'; throw new Error('Profil fictivement indisponible'); },
+  });
+  await until(() => f.controller.getSnapshot().roleStatus === 'ready');
+  const user = f.controller.getSnapshot().user;
+  await assert.rejects(f.controller.refreshUserRole());
+  assert.equal(f.controller.getSnapshot().user, user);
+  assert.equal(f.controller.getSnapshot().userRole, 'admin');
+  assert.equal(f.controller.getSnapshot().roleStatus, 'ready');
+  await f.controller.retrySession();
+  assert.equal(f.controller.getSnapshot().user, user);
+  assert.equal(f.controller.getSnapshot().sessionStatus, 'ready');
+  assert.equal(f.calls.user, 0);
 });
 
 test('Sélecteur : même chargement = remontage ; identifiant différent ou wasDiscarded = rechargement', () => {
@@ -277,14 +297,27 @@ test('Raccordement : dépôt hors des gardes, aucun key Auth et PDF local sans b
   assert.match(page, /useDashboardUpload/);
   assert.match(provider, /createPortal\(<UploadModal/);
   assert.doesNotMatch(app + provider + page, /key=\{[^}]*\b(?:user|session|auth)\b/);
-  assert.match(protectedRoute, /if \(loading && \(!user \|\| userRole === null\)\)/);
-  assert.match(adminRoute, /if \(loading && \(!user \|\| !isAdmin\)\)/);
+  assert.match(protectedRoute, /if \(isConfigured && user\) return/);
+  assert.match(adminRoute, /if \(isConfigured && user && isAdmin\) return/);
+  // Un commentaire historique ne constitue pas un écran rendu. Garder les
+  // assertions sur le code et les textes JSX, pas sur les commentaires de ligne.
+  const guards = `${protectedRoute}\n${adminRoute}`.replace(/^\s*\/\/.*$/gm, '');
+  assert.doesNotMatch(guards, /Vérification de|Vérification des|Loader2|animate-spin/);
   assert.match(pdf, /URL\.createObjectURL\(blob\)/);
   assert.match(pdf, /task\?\.destroy\(\)/);
   assert.match(pdf, /URL\.revokeObjectURL\(url\)/);
   assert.match(pdf, /pdfjs-dist\/legacy\/build\/pdf\.worker\.min\.mjs\?url/);
   assert.doesNotMatch(pdf, /\.arrayBuffer\(|https?:\/\//);
   assert.match(modal, /finally \{\s*input\.value = '';/);
+  assert.doesNotMatch(modal, /La page s.est rechargée|PICKER_RELOAD_MESSAGE|pickerReady|isSavingPicker|setPickerReloaded|addEventListener\('visibilitychange'|addEventListener\('focus'/);
+  const chooser = modal.slice(modal.indexOf('const handlePickerClick'), modal.indexOf('const visibleFiles'));
+  assert.doesNotMatch(chooser, /await |\.showPicker\(|requestAnimationFrame\(/);
+  const [authSource, storageSource, entry, moduleNotice, offline, update] = await Promise.all([
+    source('src/lib/auth-session.ts'), source('src/lib/supabase.ts'), source('index.html'),
+    source('src/lib/module-load-error.ts'), source('src/components/pwa/OfflinePage.tsx'), source('src/components/pwa/UpdateToast.tsx'),
+  ]);
+  assert.doesNotMatch(authSource + storageSource, /\.auth\.getUser\(/);
+  assert.doesNotMatch(entry + moduleNotice + offline + update, /location\.reload\(/);
   assert.match(transport, /xhr\.send\(options\.file\)/);
   assert.match(transport, /new Upload\(options\.file, settings\)/);
 });

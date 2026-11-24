@@ -20,7 +20,7 @@ export async function loadModuleWithNotice<T>(load: () => Promise<T>): Promise<T
   catch (cause) { reportModuleLoadError(); throw cause; }
 }
 
-// Réservé aux boutons « Actualiser », jamais appelé par un effet ou un worker.
-export function manuallyRefreshApp(): void {
-  window.location.reload();
+// Fermer une notice ne recharge jamais le document ni le formulaire de dépôt.
+export function dismissModuleLoadNotice(): void {
+  if (typeof document !== 'undefined') delete document.documentElement.dataset.moduleLoadError;
 }

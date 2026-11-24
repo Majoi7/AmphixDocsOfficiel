@@ -49,14 +49,10 @@ export function DashboardPage() {
           .some((value) => value?.toLocaleLowerCase('fr').includes(query.toLocaleLowerCase('fr')))),
       read: async (offset) => {
         if (!client) throw new Error('Service momentanément indisponible. Réessayez.');
-        const checkAccount = async () => {
-          const { data, error } = await client.auth.getSession();
-          if (error || data.session?.user.id !== userId) throw new Error('Reconnectez-vous pour actualiser les fichiers.');
-        };
-        await checkAccount();
-        const data = await fetchDashboardData(userId, undefined, client, { query, trash: showTrash, offset });
-        await checkAccount();
-        return data;
+        // Le contrôleur invalide les réponses d'un autre compte/projet ; les
+        // droits de lecture restent contrôlés côté Supabase, sans contrôle Auth
+        // supplémentaire avant et après chaque page de résultats.
+        return fetchDashboardData(userId, undefined, client, { query, trash: showTrash, offset });
       },
     });
     return controller;

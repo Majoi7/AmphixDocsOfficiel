@@ -7,13 +7,6 @@ interface OfflinePageProps {
 }
 
 export const OfflinePage: React.FC<OfflinePageProps> = ({ onRetry }) => {
-  const handleReload = () => {
-    if (onRetry) {
-      onRetry();
-    } else {
-      window.location.reload();
-    }
-  };
 
   return (
     <div className="min-h-screen bg-[#f1ece4] flex flex-col items-center justify-center p-6 text-center">
@@ -40,19 +33,19 @@ export const OfflinePage: React.FC<OfflinePageProps> = ({ onRetry }) => {
           Tu es hors ligne
         </h2>
         <p className="text-sm text-[#141414]/70 mt-2 leading-relaxed">
-          Il semble que ta connexion Internet soit interrompue. Dès que le réseau sera rétabli, tes documents se synchroniseront automatiquement.
+          Le réseau est interrompu. Ton dépôt reste dans cette page ; retrouve une connexion pour continuer.
         </p>
 
-        <motion.button
+        {onRetry && <motion.button
           type="button"
-          onClick={handleReload}
+          onClick={onRetry}
           whileTap={{ scale: 0.94 }}
           whileHover={{ scale: 1.04 }}
           className="mt-6 px-6 py-3 rounded-full bg-[#ff6a2b] hover:bg-[#ff8a4c] text-white font-extrabold text-sm flex items-center gap-2 shadow-lg shadow-[#ff6a2b]/30 cursor-pointer"
         >
           <RefreshCw className="w-4 h-4 animate-spin-reverse" />
           <span>Réessayer</span>
-        </motion.button>
+        </motion.button>}
       </motion.div>
     </div>
   );

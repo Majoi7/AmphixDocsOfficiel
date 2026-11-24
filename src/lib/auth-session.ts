@@ -40,8 +40,7 @@ export function createAuthSessionController({ client, generation, loadRole, publ
   let sessionRevision = 0;
   let restorationRevision = 0;
   let roleRevision = 0;
-  // L’identité annoncée par Auth reste connue pendant getUser/loadRole,
-  // même lorsque le snapshot masque encore l’utilisateur non vérifié.
+  // L’identité de la session SDK reste connue pendant le chargement initial du rôle.
   let sessionAccountId: string | null = null;
   let accountRevision = 0;
   let signOutTask: { revision: number; result: Promise<SignOutResult> } | null = null;
@@ -77,26 +76,20 @@ export function createAuthSessionController({ client, generation, loadRole, publ
     } catch (error) {
       if (!current()) return;
       const message = userError(error, 'Votre accès n’a pas pu être vérifié. Réessayez.');
-      update({ ...snapshot, userRole: null, roleStatus: 'error', roleError: message });
+      // Une erreur temporaire de profil n'efface pas le rôle déjà chargé et
+      // ne démonte pas la page. Une réponse réelle de révocation reste appliquée.
+      update(revalidating ? { ...snapshot, roleError: message }
+        : { ...snapshot, userRole: null, roleStatus: 'error', roleError: message });
       throw new Error(message);
     }
   }
 
-  async function verifySession(session: Session, version: number): Promise<void> {
-    const current = () => active() && sessionRevision === version;
-    try {
-      // getSession seul lit le stockage. getUser(token) vérifie le compte
-      // auprès d'Auth avec le jeton de CETTE session, pas d'un compte ultérieur.
-      const { data, error } = await client.auth.getUser(session.access_token);
-      if (!current()) return;
-      if (error) throw new Error(`La session n’a pas pu être vérifiée : ${errorMessage(error)}`);
-      if (!data.user || data.user.id !== session.user.id) throw new Error('Le compte vérifié ne correspond pas à la session. Reconnectez-vous.');
-      update({ ...snapshot, user: data.user, sessionStatus: 'ready', sessionError: null, roleStatus: 'loading' });
-      await resolveRole(data.user.id, version).catch(() => undefined);
-    } catch (error) {
-      if (!current()) return;
-      update({ ...emptyAuthSnapshot(generation, true), sessionStatus: 'error', sessionError: userError(error, 'Votre connexion n’a pas pu être vérifiée. Réessayez.') });
-    }
+  function openSession(session: Session, version: number): void {
+    if (!active() || sessionRevision !== version) return;
+    // La session est déjà gérée par Supabase Auth. Pas d'aller-retour getUser
+    // pour afficher la page : les API et leurs RLS vérifient le JWT côté serveur.
+    update({ ...snapshot, user: session.user, sessionStatus: 'ready', sessionError: null, roleStatus: 'loading' });
+    void resolveRole(session.user.id, version).catch(() => undefined);
   }
 
   function acceptSession(session: Session | null) {
@@ -117,12 +110,12 @@ export function createAuthSessionController({ client, generation, loadRole, publ
     ++restorationRevision;
     ++roleRevision;
     update({ ...emptyAuthSnapshot(generation, true), sessionStatus: session ? 'loading' : 'ready' });
-    if (session) schedule(() => { void verifySession(session, version); });
+    if (session) schedule(() => openSession(session, version));
   }
 
   async function restoreSession(reset: boolean): Promise<void> {
-    // Les notifications du même compte ne doivent pas annuler une vérification
-    // en cours, mais leur arrivée rend une ancienne lecture getSession obsolète.
+    // Une notification du même compte ne modifie ni l'utilisateur ni le rôle ;
+    // elle rend seulement une ancienne lecture getSession obsolète.
     const readVersion = ++restorationRevision;
     const revalidating = reset && snapshot.sessionStatus === 'ready' && snapshot.user !== null;
     const version = reset && !revalidating ? ++sessionRevision : sessionRevision;
@@ -135,11 +128,16 @@ export function createAuthSessionController({ client, generation, loadRole, publ
       const { data, error } = await client.auth.getSession();
       if (!active() || version !== sessionRevision || readVersion !== restorationRevision) return;
       if (error) throw new Error(`Impossible de restaurer la session : ${errorMessage(error)}`);
-      if (revalidating && data.session?.user.id === currentUserIdRef.current) return;
+      if (revalidating && data.session?.user.id === currentUserIdRef.current) {
+        update({ ...snapshot, sessionError: null });
+        return;
+      }
       acceptSession(data.session);
     } catch (error) {
       if (!active() || version !== sessionRevision || readVersion !== restorationRevision) return;
-      update({ ...emptyAuthSnapshot(generation, true), sessionStatus: 'error', sessionError: userError(error, 'Votre connexion n’a pas pu être rétablie. Réessayez.') });
+      const message = userError(error, 'Votre session est indisponible. Réessayez.');
+      update(revalidating ? { ...snapshot, sessionError: message }
+        : { ...emptyAuthSnapshot(generation, true), sessionStatus: 'error', sessionError: message });
     }
   }
 

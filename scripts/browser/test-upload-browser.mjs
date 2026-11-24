@@ -188,10 +188,7 @@ async function click(selector) {
 async function activateChooser(kind = 'files') {
   const before = choosers.length;
   await click(`label[for$="-${kind}"]`);
-  await waitUntil(async () => choosers.length > before
-    || await evaluate('document.body.textContent.includes("Touchez de nouveau")'), 'sauvegarde avant le sélecteur natif');
-  if (choosers.length === before) await click(`label[for$="-${kind}"]`);
-  await waitUntil(() => choosers.length === before + 1, 'activation native après commit IndexedDB');
+  await waitUntil(() => choosers.length === before + 1, 'ouverture native au premier geste, sans sauvegarde bloquante');
 }
 async function fill(selector, text) {
   await evaluate(`(() => {
@@ -213,6 +210,12 @@ async function saved(expected = {}) {
     const draft = await window.__uploadHarness.readDraft();
     return !!draft && Object.entries(${JSON.stringify(expected)}).every(([key, value]) => JSON.stringify(draft[key]) === JSON.stringify(value));
   })()`, 'commit IndexedDB et statut de sauvegarde');
+}
+async function savedPicker(kind) {
+  await waitFor(`(async () => (await window.__uploadHarness.readDraft())?.picker?.kind === ${JSON.stringify(kind)})()`,
+    'sauvegarde du marqueur en arrière-plan, sans bloquer le geste natif');
+  await saved();
+  return api('readDraft');
 }
 async function open() {
   await click('#open-upload-test');
@@ -392,7 +395,7 @@ test('sélecteurs natifs, cible tactile, focus confiné et restauration à 320 p
   assert.match(pickers.find((picker) => picker.id.endsWith('-files')).accept, /\.pdf/);
   assert.equal(pickers.find((picker) => picker.id.endsWith('-camera')).capture, 'environment');
   await activateChooser();
-  assert.equal((await api('readDraft')).picker.kind, 'files');
+  assert.equal((await savedPicker('files')).picker.kind, 'files');
   await evaluate('document.querySelector(\'input[type="file"][id$="-files"]\').dispatchEvent(new Event("cancel"))');
   await saved({ picker: null });
   await evaluate('document.querySelector(\'[aria-label="Fermer le dépôt"]\').focus()');
@@ -434,15 +437,15 @@ test('FileList copiée, MIME PDF déduit et saisies/octets restaurés après rec
 test('retour de visibilité et re-rendu : même input, mêmes fichiers, aucun faux rechargement', async () => {
   await form(22);
   await activateChooser();
-  const previous = await api('readDraft');
+  const previous = await savedPicker('files');
   assert.equal(previous.picker.pageLoadId, await api('pageLoadId'));
   await evaluate(`window.__stablePickerInput = document.querySelector('input[type="file"][id$="-files"]')`);
   await api('rerender');
   await evaluate('document.dispatchEvent(new Event("visibilitychange")); window.dispatchEvent(new Event("focus"))');
   assert.equal(await evaluate(`window.__stablePickerInput === document.querySelector('input[type="file"][id$="-files"]')`), true);
   assert.equal(await evaluate('/La page s.est rechargée/.test(document.body.textContent)'), false);
-  const returned = (await api('diagnostics')).findLast((entry) => entry.event === 'selector-returned');
-  assert.equal(returned.previousPageLoadId, returned.pageLoadId);
+  assert.ok(!(await api('diagnostics')).some((entry) => entry.event === 'selector-returned'),
+    'Le retour de focus ne doit exécuter aucun contrôle de sélecteur.');
   await api('chooseFiles', [{ name: 'nouveau.txt', text: 'nouveaux octets', type: 'text/plain' }]);
   await saved({ picker: null, titles: ['nouveau'] });
   const current = await api('readDraft');
@@ -454,7 +457,7 @@ test('retour de visibilité et re-rendu : même input, mêmes fichiers, aucun fa
 test('remontage React volontaire : identifiant de page inchangé, pas de message de rechargement', async () => {
   await form(23);
   await activateChooser('gallery');
-  const previous = await api('readDraft');
+  const previous = await savedPicker('gallery');
   assert.ok(previous.picker.pageLoadId);
   await api('remount');
   await waitFor('document.body.textContent.includes("Brouillon conservé sur cet appareil.")', 'restauration après remontage');
@@ -465,11 +468,11 @@ test('remontage React volontaire : identifiant de page inchangé, pas de message
   assert.equal(restored.previousPageLoadId, restored.pageLoadId);
 });
 
-test('sélecteur interrompu : marqueur conservé avant ouverture et message après rechargement', async () => {
+test('sélecteur interrompu : restauration silencieuse des fichiers sans message de rechargement', async () => {
   await form(17);
   const previous = (await api('readDraft')).files;
   await activateChooser('gallery');
-  const marker = (await api('readDraft')).picker;
+  const marker = (await savedPicker('gallery')).picker;
   assert.equal(marker.kind, 'gallery');
   assert.ok(marker.pageLoadId);
   await reload();
@@ -477,7 +480,7 @@ test('sélecteur interrompu : marqueur conservé avant ouverture et message apr�
   const restored = (await api('diagnostics')).findLast((entry) => entry.event === 'selector-restored');
   assert.notEqual(restored.pageLoadId, marker.pageLoadId);
   assert.equal(restored.previousPageLoadId, marker.pageLoadId);
-  assert.equal(await evaluate('document.body.textContent.includes("La page s\\\'est rechargée pendant le choix du fichier")'), true);
+  assert.equal(await evaluate('document.body.textContent.includes("La page s\\\'est rechargée pendant le choix du fichier")'), false);
   assert.deepEqual((await api('readDraft')).files, previous);
   await api('chooseFiles', [{ name: 'nouveau.txt', text: 'nouveaux octets', type: 'text/plain' }]);
   await saved({ picker: null, titles: ['nouveau'], filesPrepared: [false] });
@@ -485,19 +488,29 @@ test('sélecteur interrompu : marqueur conservé avant ouverture et message apr�
   assert.equal((await api('calls')).length, 0);
 });
 
-test('quota avant sélecteur : aucune ouverture native avant le réessai confirmé', async () => {
+test('quota du marqueur : ouverture native immédiate, sans attendre le réessai de sauvegarde', async () => {
   await form(18);
   const before = choosers.length;
   await api('failNextPut');
-  await click('label[for$="-files"]');
-  await waitFor('!!document.querySelector(\'[role="alert"] button\')', 'quota du marqueur de sélection');
-  assert.equal(choosers.length, before);
-  await click('[role="alert"] button');
-  await saved();
   await activateChooser();
   assert.equal(choosers.length, before + 1);
+  await waitFor('!!document.querySelector(\'[role="alert"] button\')', 'quota du marqueur sauvegardé en arrière-plan');
   await evaluate('document.querySelector(\'input[type="file"][id$="-files"]\').dispatchEvent(new Event("cancel"))');
   await saved({ picker: null });
+});
+
+test('sauvegarde lente : un seul geste ouvre le sélecteur, aucune vérification au retour', async () => {
+  await form(24);
+  const before = choosers.length;
+  await api('holdNextOpen');
+  await activateChooser();
+  assert.equal(choosers.length, before + 1);
+  await waitFor('window.__uploadHarness.hasHeldOpen()', 'sauvegarde du marqueur retenue');
+  assert.equal(await evaluate('/Touchez de nouveau|Vérification de|La page s.est rechargée/.test(document.body.textContent)'), false);
+  await api('chooseFiles', [{ name: 'direct.txt', text: 'octets du choix direct', type: 'text/plain' }]);
+  await api('releaseOpen');
+  await saved({ titles: ['direct'], picker: null });
+  assert.equal((await api('readDraft')).files[0].text, 'octets du choix direct');
 });
 
 test('octets et aperçu : aucun traitement avant commit, miniature réelle ensuite non bloquante', async () => {

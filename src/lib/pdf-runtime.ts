@@ -3,17 +3,20 @@ import { checkPreviewSignal } from './preview-resources';
 import { loadModuleWithNotice } from './module-load-error';
 
 // Runtime et worker legacy locaux, compatibles avec davantage de mobiles.
-// Un import échoué reste mémorisé jusqu'à l'actualisation manuelle, sans boucle.
+// Les réessais viennent uniquement d'une action de l'utilisateur, sans recharger la page.
 let runtime: Promise<typeof import('pdfjs-dist/legacy/build/pdf.mjs')> | undefined;
 export function loadPdfRuntime() {
-  runtime ??= Promise.all([
+  const pending: Promise<typeof import('pdfjs-dist/legacy/build/pdf.mjs')> = runtime ??= Promise.all([
     loadModuleWithNotice(() => import('pdfjs-dist/legacy/build/pdf.mjs')),
     loadModuleWithNotice(() => import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url')),
   ]).then(([pdf, worker]) => {
     pdf.GlobalWorkerOptions.workerSrc = worker.default;
     return pdf;
+  }).catch((error) => {
+    if (runtime === pending) runtime = undefined;
+    throw error;
   });
-  return runtime;
+  return pending;
 }
 
 export interface OpenPdf {

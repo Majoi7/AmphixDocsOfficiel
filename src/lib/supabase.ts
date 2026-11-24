@@ -216,8 +216,8 @@ function validateUploadRequest(request: UploadDocumentRequest): void {
   validateClassification(request.schoolName, request.subjectName);
 }
 
-// Le JWT reste uniquement en mémoire. Chaque requête utilise la session courante
-// du compte d'origine, vérifiée à nouveau lorsque son jeton est renouvelé.
+// Le JWT reste en mémoire et vient de Supabase Auth. Les requêtes Storage/SQL
+// vérifient les droits côté serveur ; aucun getUser supplémentaire pendant l'envoi.
 async function withUploadClient<T>(
   userId: string, projectUrl: string, operation: (client: SupabaseClient<Database>, check: () => void, signal: AbortSignal,
     credentials: { publicKey: string; getAccessToken: (forceRefresh?: boolean) => Promise<string> }) => Promise<T>,
@@ -242,10 +242,9 @@ async function withUploadClient<T>(
   const unsubscribeClient = subscribeSupabaseClient(() => {
     try { check(); } catch { invalidate(); }
   });
-  const { data: { subscription } } = authClient.auth.onAuthStateChange((_event, session) => {
-    if (session?.user?.id !== userId) invalidate();
+  const { data: { subscription } } = authClient.auth.onAuthStateChange((event, session) => {
+    if (event === 'SIGNED_OUT' || (session && session.user.id !== userId)) invalidate();
   });
-  let verifiedToken: string | null = null;
   let tokenRequest: Promise<string> | null = null;
   const readToken = async (forceRefresh: boolean): Promise<string> => {
     check();
@@ -260,14 +259,7 @@ async function withUploadClient<T>(
       if (refreshed.error || !refreshedSession || refreshedSession.user.id !== userId) throw new UploadScopeError('Reconnectez-vous au compte utilisé pour ce dépôt, puis réessayez.');
       session = refreshedSession;
     }
-    const accessToken = session.access_token;
-    if (accessToken !== verifiedToken) {
-      const verified = await authClient.auth.getUser(accessToken);
-      check();
-      if (verified.error || verified.data.user?.id !== userId) throw new UploadScopeError(`La session n’a pas pu être vérifiée : ${errorMessage(verified.error, 'Compte incompatible.')} Aucun nouvel envoi n’est autorisé.`);
-      verifiedToken = accessToken;
-    }
-    return accessToken;
+    return session.access_token;
   };
   const getAccessToken = async (forceRefresh = false): Promise<string> => {
     if (tokenRequest) {

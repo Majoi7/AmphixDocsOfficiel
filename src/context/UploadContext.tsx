@@ -20,7 +20,7 @@ const emptyDocuments: DocumentItem[] = [];
 // Sous le routeur (blocker/navigation), mais AU-DESSUS de ProtectedRoute et
 // AdminRoute. Le même composant et ses File restent vivants pendant leurs rendus.
 export function UploadProvider({ children }: { children: ReactNode }) {
-  const { user, userRole, sessionError, roleError, isConfigured } = useAuth();
+  const { user, isConfigured } = useAuth();
   const { pathname } = useLocation();
   const navigation = useLibraryNavigation();
   const targetRef = useRef<DashboardUploadTarget | null>(null);
@@ -44,8 +44,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
   return <UploadContext.Provider value={register}>
     {children}
     {createPortal(<UploadModal
-      isOpen={isConfigured && !!user && userRole !== null && !sessionError && !roleError
-        && pathname === '/dashboard' && navigation.panel === 'upload'}
+      isOpen={isConfigured && !!user && pathname === '/dashboard' && navigation.panel === 'upload'}
       onClose={navigation.closePanel} documents={documents} onSuccess={reportSuccess}
     />, document.body)}
   </UploadContext.Provider>;
